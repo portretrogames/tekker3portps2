@@ -30,7 +30,9 @@ if [ -f "$DEST/tekken3.elf" ] && [ -n "$V_ANT" ] && [ "$V_ANT" != "$VERSAO" ]; t
   echo "==> $V_ANT guardada em ELF OU ISO TESTE/antigos"
 fi
 mv -f "$DEST/tekken3.elf.novo" "$DEST/tekken3.elf"
-cp "$PACOTE/title.cfg" "$PACOTE/LEIA-ME.md" "$DEST/"
+cp "$PACOTE/title.cfg" "$PACOTE/LEIA-ME.txt" "$DEST/"
+rm -f "$DEST/LEIA-ME.md"      # até a V60 o LEIA-ME era .md
+cp build/pacote/Criar_Tekken3_PS2.html "$TESTE/"
 echo "jogo=$VERSAO" > "$VERSOES"
 echo "==> Pronto: $(realpath "$DEST/tekken3.elf")"
 

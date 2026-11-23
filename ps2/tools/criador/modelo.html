@@ -1,0 +1,242 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Criador Tekken 3 PS2 · Retrogames</title>
+<style>
+  :root{--bg:#0a0606;--panel:#170d0c;--panel2:#211211;--line:#3b211d;--gold:#e8b84a;--gold2:#ffd56b;--red:#d8442f;--text:#efe8e6;--mut:#b39f9b;--ok:#69d38a;--warn:#f0b35a;--err:#ff7a66}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--text);font:16px/1.6 system-ui,"Segoe UI",Roboto,Arial,sans-serif;
+    background-image:radial-gradient(ellipse at 50% -10%,#3a120c 0,transparent 60%)}
+  a{color:var(--gold2)}
+  .wrap{max-width:860px;margin:0 auto;padding:36px 20px 60px}
+  header .tag{display:inline-block;border:1px solid var(--gold);color:var(--gold);padding:1px 10px;font:14px ui-monospace,Consolas,monospace;letter-spacing:1px}
+  h1{font-size:clamp(28px,5vw,42px);line-height:1.1;margin:14px 0 8px}
+  h1 span{color:var(--gold)}
+  .lead{color:var(--mut);margin:0 0 28px}
+  .passo{background:var(--panel);border:1px solid var(--line);border-left:4px solid var(--gold);padding:22px 24px;margin-bottom:18px}
+  .passo.inativo{opacity:.45;pointer-events:none}
+  .passo h2{margin:0 0 6px;font-size:20px}
+  .passo h2 b{color:var(--gold);font-family:ui-monospace,Consolas,monospace;margin-right:8px}
+  .passo p{margin:6px 0;color:var(--mut)}
+  .solta{display:block;margin-top:14px;border:2px dashed var(--line);padding:26px;text-align:center;cursor:pointer;transition:.15s}
+  .solta:hover,.solta.sobre{border-color:var(--gold);background:rgba(232,184,74,.06)}
+  .solta strong{display:block;font-size:17px;margin-bottom:4px}
+  .solta small{color:var(--mut)}
+  input[type=file]{display:none}
+  .btns{display:flex;flex-wrap:wrap;gap:12px;margin-top:14px}
+  button.b{padding:12px 18px;font:600 16px system-ui,sans-serif;border:2px solid var(--gold);background:var(--gold);color:var(--bg);cursor:pointer}
+  button.b:hover{background:var(--gold2);border-color:var(--gold2)}
+  button.b.ghost{background:transparent;color:var(--gold)}
+  button.b:disabled{opacity:.5;cursor:default}
+  .barra{height:10px;background:var(--panel2);border:1px solid var(--line);margin-top:14px;display:none}
+  .barra i{display:block;height:100%;width:0;background:linear-gradient(90deg,var(--red),var(--gold))}
+  .estado{margin-top:10px;font-size:15px;min-height:1.4em;color:var(--mut)}
+  ul.res{list-style:none;margin:14px 0 0;padding:0}
+  ul.res li{padding:8px 0;border-bottom:1px dashed var(--line)}
+  .ok{color:var(--ok)} .warn{color:var(--warn)} .err{color:var(--err)}
+  .caixa{margin-top:14px;padding:12px 16px;border:1px solid rgba(232,184,74,.35);background:rgba(232,184,74,.07);font-size:15px}
+  .caixa.err{border-color:rgba(255,122,102,.5);background:rgba(255,122,102,.08);color:var(--text)}
+  code{font-family:ui-monospace,Consolas,monospace;font-size:.9em;background:var(--panel2);border:1px solid var(--line);padding:1px 6px}
+  pre{background:#0d0707;border:1px solid var(--line);padding:12px 14px;font:14px/1.5 ui-monospace,Consolas,monospace;overflow:auto;margin:10px 0 0}
+  footer{color:var(--mut);font-size:13px;margin-top:30px;border-top:1px solid var(--line);padding-top:16px}
+  footer p{margin:4px 0}
+</style>
+</head>
+<body>
+<div class="wrap">
+<header>
+  <div class="tag">RETROGAMES · PORT NATIVO · @@VERSAO@@</div>
+  <h1>Criador <span>Tekken 3 PS2</span></h1>
+  <p class="lead">Prepara o pendrive para jogar o port pelo OPL, usando a imagem do <b>seu</b> disco americano de Tekken 3. Tudo acontece neste computador: nada é enviado para a internet.</p>
+</header>
+
+<section class="passo" id="p1">
+  <h2><b>1</b>Escolha a imagem do seu disco</h2>
+  <p>Tekken 3 americano (SLUS-00402) em <code>.bin</code>/<code>.cue</code>: as faixas separadas (selecione todas juntas) ou a imagem num <code>.bin</code> só. Arquivos <code>.zip</code>/<code>.7z</code> precisam ser extraídos antes.</p>
+  <label class="solta" id="solta" for="arquivos">
+    <strong>Clique para escolher os arquivos</strong>
+    <small>ou arraste o .bin e o .cue para cá</small>
+  </label>
+  <input type="file" id="arquivos" multiple accept=".bin,.cue,.BIN,.CUE">
+  <div class="barra" id="barra1"><i></i></div>
+  <div class="estado" id="estado1"></div>
+  <ul class="res" id="res"></ul>
+  <div id="msg1"></div>
+</section>
+
+<section class="passo inativo" id="p2">
+  <h2><b>2</b>Grave no pendrive</h2>
+  <p>Pendrive em <b>FAT32</b> ou <b>exFAT</b>, com uns 700 MB livres. O criador monta a pasta <code>APPS/TEKKEN3</code> com o port e o seu jogo.</p>
+  <div class="btns">
+    <button class="b" id="gravar" hidden>Gravar no pendrive</button>
+    <button class="b ghost" id="zip">Baixar ZIP para extrair no pendrive</button>
+  </div>
+  <p id="dicaGravar" hidden>Ao gravar, escolha a <b>raiz do pendrive</b> (a pasta principal dele) e permita que o navegador salve ali.</p>
+  <p id="semGravar" hidden>Este navegador não grava direto no pendrive (só o Chrome e o Edge no computador). Baixe o ZIP e extraia na raiz do pendrive.</p>
+  <div class="barra" id="barra2"><i></i></div>
+  <div class="estado" id="estado2"></div>
+  <div id="msg2"></div>
+</section>
+
+<section class="passo inativo" id="p3">
+  <h2><b>3</b>Jogue no PS2</h2>
+  <p>Coloque o pendrive no PS2 e abra o OPL: aba <b>Aplicativos → Tekken 3 (port nativo)</b>. Ou, pelo wLaunchELF, <code>mass:/APPS/TEKKEN3/tekken3.elf</code>.</p>
+<pre>APPS/
+  TEKKEN3/
+    tekken3.elf
+    title.cfg
+    LEIA-ME.txt
+    TEKKEN3.BIN      (faixa 1 do seu disco)
+    TEKKEN3_2.BIN    (faixa 2, se houver)</pre>
+  <p>Achou um erro? <a href="https://github.com/portretrogames/tekker3portps2/issues/new?template=erro.yml">Reporte aqui</a> com uma foto da tela.</p>
+</section>
+
+<footer>
+  <p>Port @@VERSAO@@ · ELF <span title="SHA-256">@@ELF_SHA_CURTO@@</span> · <a href="https://portretrogames.github.io/tekker3portps2/">portretrogames.github.io/tekker3portps2</a></p>
+  <p><i>Tekken 3</i> © Bandai Namco Entertainment. Este arquivo não contém o jogo: ele usa a sua cópia. Projeto de fãs, gratuito, sem ligação com a Bandai Namco.</p>
+</footer>
+</div>
+
+<script id="elf" type="application/octet-stream">
+@@ELF_B64@@
+</script>
+<script>
+/*@@NUCLEO@@*/
+</script>
+<script>
+(() => {
+  'use strict';
+  const N = NucleoT3;
+  const LEIA_ME = @@LEIAME_JSON@@;
+  const $ = (id) => document.getElementById(id);
+  let conferido = null, elf = null, ocupado = false;
+
+  function elfBytes() {
+    if (elf) return elf;
+    const b = atob($('elf').textContent.replace(/\s+/g, ''));
+    elf = new Uint8Array(b.length);
+    for (let i = 0; i < b.length; i++) elf[i] = b.charCodeAt(i);
+    return elf;
+  }
+  const mb = (n) => (n / 1048576).toFixed(0) + ' MB';
+  function barra(id, f) { const b = $(id); b.style.display = f === null ? 'none' : 'block'; if (f !== null) b.firstElementChild.style.width = (f * 100).toFixed(1) + '%'; }
+  function caixa(id, html, erro) { $(id).innerHTML = html ? `<div class="caixa${erro ? ' err' : ''}">${html}</div>` : ''; }
+  const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+  function ativa(id, sim) { $(id).classList.toggle('inativo', !sim); }
+
+  function explicaErro(e) {
+    if (e.codigo === 'SEM_FAIXA1') {
+      const linhas = (e.desconhecidos || []).map((d) => `<li><code>${esc(d.nome)}</code>: ${d.motivo === 'formato'
+        ? 'formato não aceito (use .bin/.cue; extraia .zip/.7z antes; .iso, .chd e .ecm não servem)'
+        : 'tamanho diferente do Tekken 3 americano (' + mb(d.tamanho) + '): pode ser outra versão (europeia, japonesa) ou uma imagem incompleta'}</li>`).join('');
+      return 'Não achei a faixa 1 do Tekken 3 americano entre os arquivos escolhidos.' + (linhas ? `<ul>${linhas}</ul>` : ' ') +
+        'A faixa 1 tem exatamente ' + N.T1_BYTES.toLocaleString('pt-BR') + ' bytes.';
+    }
+    if (e.codigo === 'NAO_E_DISCO' || e.codigo === 'NAO_E_PS1') return 'O arquivo tem o tamanho certo, mas não parece uma imagem de disco de PS1. Confira se é a imagem .bin original.';
+    if (e.codigo === 'OUTRO_JOGO') return `Esta imagem é de outro jogo (executável <code>${esc(e.boot)}</code>). O port precisa do Tekken 3 americano (<code>SLUS_004.02</code>).`;
+    return 'Não consegui ler os arquivos: ' + esc(e.message || e);
+  }
+
+  async function escolher(lista) {
+    if (ocupado || !lista || !lista.length) return;
+    ocupado = true; conferido = null;
+    ativa('p2', false); ativa('p3', false); caixa('msg1', ''); caixa('msg2', ''); $('res').innerHTML = '';
+    $('estado1').textContent = 'Lendo...'; barra('barra1', 0);
+    try {
+      const r = await N.conferir([...lista], (t, f) => { $('estado1').textContent = t + '...'; barra('barra1', f); });
+      conferido = r;
+      const itens = [
+        `<li class="ok">✓ Tekken 3 americano (<code>${esc(r.jogo.boot)}</code>)</li>`,
+        r.crc1Ok ? `<li class="ok">✓ Faixa 1 (dados): ${esc(r.f1.nome)} · conferida, igual à cópia testada no console</li>`
+                 : `<li class="warn">⚠ Faixa 1 (dados): ${esc(r.f1.nome)} · CRC ${N.hex8(r.crc1)} diferente da cópia testada (${N.hex8(N.T1_CRC)}). Pode funcionar, mas essa cópia não foi testada; se der erro, tente outra imagem do seu disco.</li>`,
+        r.f2 ? (r.crc2Ok ? `<li class="ok">✓ Faixa 2 (música em CD): ${esc(r.f2.nome)} · conferida</li>`
+                         : `<li class="warn">⚠ Faixa 2 (música em CD): ${esc(r.f2.nome)} · CRC ${N.hex8(r.crc2)} diferente da cópia testada</li>`)
+             : '<li class="warn">⚠ Faixa 2 (música em CD) não encontrada: o jogo roda igual, só esse trecho de música fica em silêncio.</li>',
+      ];
+      $('res').innerHTML = itens.join('');
+      $('estado1').textContent = 'Pronto.'; barra('barra1', null);
+      ativa('p2', true);
+    } catch (e) {
+      barra('barra1', null); $('estado1').textContent = '';
+      caixa('msg1', explicaErro(e), true);
+    } finally { ocupado = false; }
+  }
+
+  async function gravarNaPasta(raiz) {
+    let pasta = raiz;
+    const nome = (raiz.name || '').toUpperCase();
+    if (nome !== 'TEKKEN3') {
+      if (nome !== 'APPS') pasta = await pasta.getDirectoryHandle('APPS', { create: true });
+      pasta = await pasta.getDirectoryHandle('TEKKEN3', { create: true });
+    }
+    const lista = N.arquivosParaGravar({ elf: elfBytes(), leiaMe: LEIA_ME, conferido });
+    const total = lista.reduce((s, a) => s + (a.dados ? a.dados.length : a.pedaco.tamanho), 0);
+    const PASSO = 16 << 20;
+    let feito = 0;
+    for (const a of lista) {
+      const arq = a.caminho.split('/').pop();
+      $('estado2').textContent = 'Gravando ' + arq + '...';
+      const fh = await pasta.getFileHandle(arq, { create: true });
+      const w = await fh.createWritable();
+      try {
+        if (a.dados) { await w.write(a.dados); feito += a.dados.length; barra('barra2', feito / total); }
+        else {
+          const blob = N.blobDe(a.pedaco);
+          for (let i = 0; i < blob.size; i += PASSO) {
+            const parte = blob.slice(i, i + PASSO);
+            await w.write(parte); feito += parte.size; barra('barra2', feito / total);
+          }
+        }
+        await w.close();
+      } catch (e) { try { await w.abort(); } catch (e2) {} throw e; }
+    }
+  }
+
+  async function gravar() {
+    if (ocupado || !conferido) return;
+    let raiz;
+    try { raiz = await window.showDirectoryPicker({ id: 'pendrive-tekken3', mode: 'readwrite' }); }
+    catch (e) { if (e.name !== 'AbortError') caixa('msg2', 'O navegador não liberou a pasta: ' + esc(e.message), true); return; }
+    ocupado = true; caixa('msg2', ''); barra('barra2', 0);
+    try {
+      await gravarNaPasta(raiz);
+      $('estado2').textContent = 'Gravado.'; barra('barra2', null);
+      caixa('msg2', '✓ Tudo gravado em <code>APPS/TEKKEN3</code>. Use "Remover com segurança" antes de tirar o pendrive.');
+      ativa('p3', true);
+    } catch (e) {
+      barra('barra2', null); $('estado2').textContent = '';
+      const semEspaco = e.name === 'QuotaExceededError' || /space|espaço|quota/i.test(e.message || '');
+      caixa('msg2', semEspaco ? 'Faltou espaço no pendrive: libere uns 700 MB e grave de novo.'
+        : 'A gravação parou: ' + esc(e.message || e) + '. Confira se o pendrive está conectado e grave de novo.', true);
+    } finally { ocupado = false; }
+  }
+
+  function baixarZip() {
+    if (ocupado || !conferido) return;
+    const lista = N.arquivosParaGravar({ elf: elfBytes(), leiaMe: LEIA_ME, conferido });
+    const blob = N.gerarZipBlob(lista);
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = 'Tekken3_PS2_pendrive.zip';
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(a.href), 120000);
+    caixa('msg2', `O ZIP (${mb(blob.size)}) está sendo baixado. Extraia o conteúdo na <b>raiz do pendrive</b>: a pasta <code>APPS</code> tem que ficar na pasta principal dele.`);
+    ativa('p3', true);
+  }
+
+  $('arquivos').addEventListener('change', (e) => escolher(e.target.files));
+  const solta = $('solta');
+  ['dragenter', 'dragover'].forEach((t) => solta.addEventListener(t, (e) => { e.preventDefault(); solta.classList.add('sobre'); }));
+  ['dragleave', 'drop'].forEach((t) => solta.addEventListener(t, (e) => { e.preventDefault(); solta.classList.remove('sobre'); }));
+  solta.addEventListener('drop', (e) => escolher(e.dataTransfer.files));
+  if ('showDirectoryPicker' in window) { $('gravar').hidden = false; $('dicaGravar').hidden = false; }
+  else $('semGravar').hidden = false;
+  $('gravar').addEventListener('click', gravar);
+  $('zip').addEventListener('click', baixarZip);
+  window.__criador = { escolher, arquivosZip: () => N.gerarZipBlob(N.arquivosParaGravar({ elf: elfBytes(), leiaMe: LEIA_ME, conferido })), estado: () => conferido };
+})();
+</script>
+</body>
+</html>

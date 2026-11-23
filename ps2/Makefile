@@ -36,9 +36,10 @@ pacote: all
 	@rm -rf build/pacote && mkdir -p build/pacote/APPS/TEKKEN3
 	$(EE_STRIP) -R .pdr -R .comment -R .mdebug.eabi64 -o build/pacote/APPS/TEKKEN3/tekken3.elf $(EE_BIN)
 	printf 'title=Tekken 3 (port nativo)\nboot=tekken3.elf\n' > build/pacote/APPS/TEKKEN3/title.cfg
-	cp docs/PS2_REAL.md build/pacote/APPS/TEKKEN3/LEIA-ME.md
+	cp pacote/LEIA-ME.txt build/pacote/APPS/TEKKEN3/LEIA-ME.txt
 	cp build/pacote/APPS/TEKKEN3/tekken3.elf ../tekken3.elf
-	@echo "Pacote em build/pacote/APPS/TEKKEN3 (copie o .bin do jogo para la); copia em ../tekken3.elf"
+	python3 tools/montar_criador.py build/pacote/Criar_Tekken3_PS2.html
+	@echo "Pacote em build/pacote (APPS/TEKKEN3 + Criar_Tekken3_PS2.html); copia do ELF em ../tekken3.elf"
 
 .DEFAULT_GOAL := all
 all: $(EE_BIN) build/mult1_ok
@@ -159,6 +160,8 @@ test:
 	build/tests/cartao_test
 	gcc -std=c99 -fsanitize=undefined -fno-sanitize-recover=all -I$(REF_INC) runtime/gte.c tests/gte_test.c -o build/tests/gte_ubsan
 	build/tests/gte_ubsan > /dev/null
+	@# criador do navegador (núcleo em JS); com o disco em ../../ROM confere o jogo de verdade
+	@if command -v node >/dev/null; then node tools/criador/testar_nucleo.js "../../ROM"; else echo "(sem node: teste do criador pulado)"; fi
 	@echo "Testes OK"
 
 clean:

@@ -1,0 +1,42 @@
+TEKKEN 3 - PORT NATIVO PARA PS2 (beta) - Retrogames Patos de Minas
+https://portretrogames.github.io/tekker3portps2/
+
+Nao e emulador: o codigo do Tekken 3 de PS1 foi recompilado para o PS2.
+O jogo NAO vem no pacote: use a imagem do SEU disco (versao americana, SLUS-00402).
+
+MAIS FACIL: abra o Criar_Tekken3_PS2.html no navegador do computador, escolha a
+imagem do seu disco e ele grava tudo no pendrive (ou baixa um ZIP pronto).
+
+O QUE VAI NO PENDRIVE (FAT32 ou exFAT)
+
+  APPS/
+    TEKKEN3/
+      tekken3.elf
+      title.cfg
+      TEKKEN3.BIN   <- faixa 1 do seu disco (ou "Tekken 3 (USA) (Track 1).bin")
+      TEKKEN3_2.BIN <- faixa 2, opcional (ou "Tekken 3 (USA) (Track 2).bin")
+
+Sem a faixa 2 o jogo roda igual: so o trecho de musica em CD fica em silencio.
+Nao precisa extrair nada do disco: o port le o executavel de dentro do .bin.
+
+COMO ABRIR
+  OPL: aba Aplicativos -> "Tekken 3 (port nativo)".
+  wLaunchELF: mass:/APPS/TEKKEN3/tekken3.elf
+
+NO JOGO
+  - X ou START passam as telas de inicio.
+  - Dois controles; o analogico esquerdo funciona como o direcional.
+  - Save no memory card da porta 1 (pasta TEKKEN3PS2, com icone 3D):
+    CARD SAVE / CARD LOAD no menu OPTION.
+
+LIMITACOES (beta)
+  - Em cenas pesadas um quadro ou outro cai para 30 por segundo.
+  - Sem vibracao. Por enquanto so como aplicativo (sem ISO).
+
+ACHOU UM ERRO?
+  https://github.com/portretrogames/tekker3portps2/issues/new?template=erro.yml
+  Mande foto da tela e, se puder, o log do pacote de depuracao
+  (RetroGames_Tekken_3_PS2_V60_depuracao.zip, na mesma pagina da versao).
+
+Tekken 3 (c) Bandai Namco Entertainment. Projeto de fas, gratuito, sem ligacao
+com a Bandai Namco.

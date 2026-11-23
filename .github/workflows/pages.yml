@@ -1,5 +1,6 @@
 # Publica a página do port (pasta site/) no GitHub Pages.
-# Roda quando o site muda e à mão (Actions > Site > Run workflow). Sem gatilho de
+# Roda quando o site muda e à mão (Actions > Site > Run workflow): rode à mão depois
+# de publicar uma release, para a página levar o criador novo. Sem gatilho de
 # release: o ambiente github-pages só aceita o ramo main, e a página busca a versão
 # mais nova sozinha.
 name: Site
@@ -24,9 +25,21 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Montar o site
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           mkdir -p _site
           cp -r site/. _site/
+          # O criador não fica no código (tem o ELF dentro): é tirado do ZIP da
+          # release mais nova (mesmo pré-lançamento) a cada publicação.
+          TAG=$(gh release list --repo "$GITHUB_REPOSITORY" --limit 1 --json tagName --jq ".[0].tagName")
+          if [ -n "$TAG" ] && gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern "RetroGames_Tekken_3_PS2_V*.zip" --dir /tmp/rel; then
+            for z in /tmp/rel/*.zip; do
+              case "$z" in *depuracao*) continue;; esac
+              unzip -p "$z" Criar_Tekken3_PS2.html > _site/criador.html && break
+            done
+          fi
+          [ -s _site/criador.html ] || { rm -f _site/criador.html; echo "::warning::o ZIP da release não tem o Criar_Tekken3_PS2.html"; }
           touch _site/.nojekyll
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3

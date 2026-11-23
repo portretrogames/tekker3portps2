@@ -111,6 +111,7 @@
   .copy:hover{background:rgba(232,184,74,.12)}
   footer{border-top:1px solid var(--line);padding:32px 0 48px;color:var(--mut);font-size:14px}
   footer p{margin:6px 0}
+  .way .badge{font-family:VT323,monospace;color:var(--bg);background:var(--gold);padding:0 8px;font-size:18px;margin-left:8px;vertical-align:2px;white-space:nowrap;display:inline-block}
 </style>
 </head>
 <body>
@@ -131,6 +132,7 @@
     <p class="lead">Não é emulador: o código do Tekken 3 de PS1 foi recompilado para o processador do PS2. As lutas rodam a 60 imagens por segundo, com música, efeitos e vozes, dois controles e save no memory card. Gráficos, sons e vídeos são lidos do seu próprio disco.</p>
     <div class="btns">
       <a class="btn" id="dl" href="https://github.com/portretrogames/tekker3portps2/releases">⬇ Baixar o pacote</a>
+      <a class="btn ghost" href="criador.html">Criar pelo navegador</a>
       <a class="btn ghost" href="#erro">Reportar um erro</a>
     </div>
     <div class="rel" id="rel">Todas as versões em Releases.</div>
@@ -148,7 +150,7 @@
     <div class="card"><div class="ic">2P</div><h3>Dois controles</h3><p>Modo VS com dois controles. O analógico esquerdo funciona como o direcional.</p></div>
     <div class="card"><div class="ic">SAVE</div><h3>Memory card do PS2</h3><p>CARD SAVE e CARD LOAD no menu OPTION. Fica na pasta <code>TEKKEN3PS2</code>, com ícone 3D no navegador do PS2.</p></div>
     <div class="card"><div class="ic">VÍDEOS</div><h3>Vídeos do disco</h3><p>A abertura e os outros vídeos são decodificados no PS2, com som.</p></div>
-    <div class="card"><div class="ic">OPL</div><h3>Pelo pendrive</h3><p>Abre como aplicativo no OPL ou pelo wLaunchELF, com a imagem do seu disco ao lado.</p></div>
+    <div class="card"><div class="ic">CRIADOR</div><h3>Pronto em poucos cliques</h3><p>O criador no navegador confere a imagem do seu disco e grava tudo no pendrive para abrir pelo OPL.</p></div>
   </div>
 </div></section>
 
@@ -157,7 +159,17 @@
   <p class="sub">Você precisa da imagem <b>.bin/.cue do seu próprio disco</b> de <i>Tekken 3</i>, versão americana (SLUS-00402). O jogo não vem no pacote nem neste site.</p>
   <div class="steps">
     <div class="way">
-      <h3>1. Monte a pasta no pendrive</h3>
+      <h3>Pelo criador no navegador <span class="badge">MAIS FÁCIL</span></h3>
+      <ol>
+        <li>Abra o <a href="criador.html">Criador Tekken 3 PS2</a> no computador (também vem no pacote como <code>Criar_Tekken3_PS2.html</code>).</li>
+        <li>Escolha a imagem do seu disco (<code>.bin</code>/<code>.cue</code>): ele confere se é o Tekken 3 americano e acerta as faixas.</li>
+        <li>No Chrome e no Edge ele grava direto no pendrive; nos outros navegadores baixa um ZIP para extrair na raiz do pendrive.</li>
+        <li>No OPL, abra <b>Aplicativos → Tekken 3 (port nativo)</b>.</li>
+      </ol>
+      <div class="note">Tudo acontece no seu computador: nada é enviado para a internet.</div>
+    </div>
+    <div class="way">
+      <h3>Sem o criador: 1. Monte a pasta no pendrive</h3>
       <ol>
         <li>Baixe e extraia o <a href="https://github.com/portretrogames/tekker3portps2/releases">pacote da última versão</a> na raiz de um pendrive FAT32 ou exFAT.</li>
         <li>Copie para <code>APPS/TEKKEN3/</code> a faixa 1 do seu disco e, se tiver, a faixa 2 (música em CD):</li>
@@ -166,11 +178,11 @@
   TEKKEN3/
     tekken3.elf
     title.cfg
-    Tekken 3 (USA) (Track 1).bin    (ou TEKKEN3.BIN)
-    Tekken 3 (USA) (Track 2).bin    (opcional; ou TEKKEN3_2.BIN)</pre>
+    TEKKEN3.BIN      (faixa 1; ou "Tekken 3 (USA) (Track 1).bin")
+    TEKKEN3_2.BIN    (faixa 2, opcional; ou "Tekken 3 (USA) (Track 2).bin")</pre>
     </div>
     <div class="way">
-      <h3>2. Abra no PS2</h3>
+      <h3>Sem o criador: 2. Abra no PS2</h3>
       <ul>
         <li><b>OPL:</b> aba <b>Aplicativos → Tekken 3 (port nativo)</b>.</li>
         <li><b>wLaunchELF:</b> abra <code>mass:/APPS/TEKKEN3/tekken3.elf</code>.</li>
