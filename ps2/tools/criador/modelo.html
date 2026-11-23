@@ -111,7 +111,13 @@
   const N = NucleoT3;
   const LEIA_ME = @@LEIAME_JSON@@;
   const $ = (id) => document.getElementById(id);
-  let conferido = null, elf = null, ocupado = false;
+  let conferido = null, elf = null, ocupado = false, urlZip = null;
+  /* enquanto confere ou grava, nada mais pode ser clicado */
+  function setOcupado(sim) {
+    ocupado = sim;
+    for (const id of ['arquivos', 'gravar', 'zip']) $(id).disabled = sim;
+    $('solta').style.pointerEvents = sim ? 'none' : '';
+  }
 
   function elfBytes() {
     if (elf) return elf;
@@ -134,6 +140,8 @@
       return 'Não achei a faixa 1 do Tekken 3 americano entre os arquivos escolhidos.' + (linhas ? `<ul>${linhas}</ul>` : ' ') +
         'A faixa 1 tem exatamente ' + N.T1_BYTES.toLocaleString('pt-BR') + ' bytes.';
     }
+    if (e.codigo === 'VARIAS_IMAGENS') return 'Há arquivos de mais de uma imagem do disco na seleção (' +
+      e.nomes.map((n) => `<code>${esc(n)}</code>`).join(', ') + '). Escolha os arquivos de uma imagem só.';
     if (e.codigo === 'NAO_E_DISCO' || e.codigo === 'NAO_E_PS1') return 'O arquivo tem o tamanho certo, mas não parece uma imagem de disco de PS1. Confira se é a imagem .bin original.';
     if (e.codigo === 'OUTRO_JOGO') return `Esta imagem é de outro jogo (executável <code>${esc(e.boot)}</code>). O port precisa do Tekken 3 americano (<code>SLUS_004.02</code>).`;
     return 'Não consegui ler os arquivos: ' + esc(e.message || e);
@@ -141,7 +149,7 @@
 
   async function escolher(lista) {
     if (ocupado || !lista || !lista.length) return;
-    ocupado = true; conferido = null;
+    setOcupado(true); conferido = null;
     ativa('p2', false); ativa('p3', false); caixa('msg1', ''); caixa('msg2', ''); $('res').innerHTML = '';
     $('estado1').textContent = 'Lendo...'; barra('barra1', 0);
     try {
@@ -161,17 +169,17 @@
     } catch (e) {
       barra('barra1', null); $('estado1').textContent = '';
       caixa('msg1', explicaErro(e), true);
-    } finally { ocupado = false; }
+    } finally { setOcupado(false); }
   }
 
-  async function gravarNaPasta(raiz) {
+  async function gravarNaPasta(raiz, sel) {
     let pasta = raiz;
     const nome = (raiz.name || '').toUpperCase();
     if (nome !== 'TEKKEN3') {
       if (nome !== 'APPS') pasta = await pasta.getDirectoryHandle('APPS', { create: true });
       pasta = await pasta.getDirectoryHandle('TEKKEN3', { create: true });
     }
-    const lista = N.arquivosParaGravar({ elf: elfBytes(), leiaMe: LEIA_ME, conferido });
+    const lista = N.arquivosParaGravar({ elf: elfBytes(), leiaMe: LEIA_ME, conferido: sel });
     const total = lista.reduce((s, a) => s + (a.dados ? a.dados.length : a.pedaco.tamanho), 0);
     const PASSO = 16 << 20;
     let feito = 0;
@@ -196,12 +204,17 @@
 
   async function gravar() {
     if (ocupado || !conferido) return;
+    const sel = conferido;              /* a seleção de agora, mesmo que mude depois */
+    setOcupado(true);
     let raiz;
     try { raiz = await window.showDirectoryPicker({ id: 'pendrive-tekken3', mode: 'readwrite' }); }
-    catch (e) { if (e.name !== 'AbortError') caixa('msg2', 'O navegador não liberou a pasta: ' + esc(e.message), true); return; }
-    ocupado = true; caixa('msg2', ''); barra('barra2', 0);
+    catch (e) {
+      if (e.name !== 'AbortError') caixa('msg2', 'O navegador não liberou a pasta: ' + esc(e.message), true);
+      setOcupado(false); return;
+    }
+    caixa('msg2', ''); barra('barra2', 0);
     try {
-      await gravarNaPasta(raiz);
+      await gravarNaPasta(raiz, sel);
       $('estado2').textContent = 'Gravado.'; barra('barra2', null);
       caixa('msg2', '✓ Tudo gravado em <code>APPS/TEKKEN3</code>. Use "Remover com segurança" antes de tirar o pendrive.');
       ativa('p3', true);
@@ -210,23 +223,26 @@
       const semEspaco = e.name === 'QuotaExceededError' || /space|espaço|quota/i.test(e.message || '');
       caixa('msg2', semEspaco ? 'Faltou espaço no pendrive: libere uns 700 MB e grave de novo.'
         : 'A gravação parou: ' + esc(e.message || e) + '. Confira se o pendrive está conectado e grave de novo.', true);
-    } finally { ocupado = false; }
+    } finally { setOcupado(false); }
   }
 
   function baixarZip() {
     if (ocupado || !conferido) return;
-    const lista = N.arquivosParaGravar({ elf: elfBytes(), leiaMe: LEIA_ME, conferido });
-    const blob = N.gerarZipBlob(lista);
+    let blob;
+    try { blob = N.gerarZipBlob(N.arquivosParaGravar({ elf: elfBytes(), leiaMe: LEIA_ME, conferido })); }
+    catch (e) { caixa('msg2', 'Não consegui montar o ZIP: ' + esc(e.message || e), true); return; }
+    /* a URL fica viva até o próximo ZIP (o "Salvar como" pode demorar) */
+    if (urlZip) URL.revokeObjectURL(urlZip);
+    urlZip = URL.createObjectURL(blob);
     const a = document.createElement('a');
-    a.href = URL.createObjectURL(blob);
+    a.href = urlZip;
     a.download = 'Tekken3_PS2_pendrive.zip';
     document.body.appendChild(a); a.click(); a.remove();
-    setTimeout(() => URL.revokeObjectURL(a.href), 120000);
     caixa('msg2', `O ZIP (${mb(blob.size)}) está sendo baixado. Extraia o conteúdo na <b>raiz do pendrive</b>: a pasta <code>APPS</code> tem que ficar na pasta principal dele.`);
     ativa('p3', true);
   }
 
-  $('arquivos').addEventListener('change', (e) => escolher(e.target.files));
+  $('arquivos').addEventListener('change', (e) => { const f = [...e.target.files]; e.target.value = ''; escolher(f); });
   const solta = $('solta');
   ['dragenter', 'dragover'].forEach((t) => solta.addEventListener(t, (e) => { e.preventDefault(); solta.classList.add('sobre'); }));
   ['dragleave', 'drop'].forEach((t) => solta.addEventListener(t, (e) => { e.preventDefault(); solta.classList.remove('sobre'); }));

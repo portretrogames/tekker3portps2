@@ -19,7 +19,8 @@ const NucleoT3 = (() => {
   const EXE = 'SLUS_004.02';
   const PASTA = 'APPS/TEKKEN3/';
   const NOME_F1 = 'TEKKEN3.BIN', NOME_F2 = 'TEKKEN3_2.BIN';   /* nomes que o port procura primeiro */
-  const TITLE_CFG = 'title=Tekken 3 (port nativo)\nboot=tekken3.elf\n';
+  const TITLE_CFG = 'title=Tekken 3 (port nativo)\nboot=tekken3.elf\n';   /* igual a ps2/pacote/title.cfg */
+  const dec = new TextDecoder(), enc = new TextEncoder();
 
   class ErroDisco extends Error {
     constructor(codigo, detalhe) { super(codigo); this.codigo = codigo; Object.assign(this, detalhe || {}); }
@@ -56,22 +57,26 @@ const NucleoT3 = (() => {
      arquivos: lista de File (ou {name, size, slice}). Reconhece pelo tamanho:
      faixa 1, faixa 2, faixa 3 (não usada) ou a imagem inteira num .bin só. */
   function classificar(arquivos) {
-    let f1 = null, f2 = null;
+    const c1 = [], c2 = [];
     const ignorados = [], desconhecidos = [];
     for (const a of arquivos) {
       const nome = a.name || '';
       if (/\.cue$/i.test(nome)) { ignorados.push({ nome, motivo: 'cue' }); continue; }
       if (/\.(iso|img|mdf|ecm|chd|7z|zip|rar)$/i.test(nome)) { desconhecidos.push({ nome, tamanho: a.size, motivo: 'formato' }); continue; }
-      if (a.size === T1_BYTES) f1 = f1 || pedaco(a, 0, T1_BYTES);
-      else if (a.size === T2_BYTES) f2 = f2 || pedaco(a, 0, T2_BYTES);
+      if (a.size === T1_BYTES) c1.push(pedaco(a, 0, T1_BYTES));
+      else if (a.size === T2_BYTES) c2.push(pedaco(a, 0, T2_BYTES));
       else if (a.size === T3_BYTES) ignorados.push({ nome, motivo: 'faixa3' });
       else if (a.size === TUDO_BYTES) {
-        f1 = f1 || pedaco(a, 0, T1_BYTES);
-        f2 = f2 || pedaco(a, T1_BYTES, T1_BYTES + T2_BYTES);
+        c1.push(pedaco(a, 0, T1_BYTES));
+        c2.push(pedaco(a, T1_BYTES, T1_BYTES + T2_BYTES));
       } else desconhecidos.push({ nome, tamanho: a.size, motivo: 'tamanho' });
     }
-    if (!f1) throw new ErroDisco('SEM_FAIXA1', { desconhecidos });
-    return { f1, f2, ignorados, desconhecidos };
+    /* Duas faixas 1 (ou 2) = arquivos de mais de uma imagem: não dá para saber
+       qual usar sem arriscar misturar discos. */
+    if (c1.length > 1 || c2.length > 1)
+      throw new ErroDisco('VARIAS_IMAGENS', { nomes: [...c1, ...c2].map((p) => p.nome) });
+    if (!c1.length) throw new ErroDisco('SEM_FAIXA1', { desconhecidos });
+    return { f1: c1[0], f2: c2[0] || null, ignorados, desconhecidos };
   }
 
   /* ----------------------------------------- conferir o jogo (SYSTEM.CNF)
@@ -86,7 +91,7 @@ const NucleoT3 = (() => {
   };
   async function conferirJogo(f1) {
     const pvd = await dadosSetor(f1, 16);
-    const id = new TextDecoder().decode(pvd.subarray(1, 6));
+    const id = dec.decode(pvd.subarray(1, 6));
     if (pvd[0] !== 1 || id !== 'CD001') throw new ErroDisco('NAO_E_DISCO');
     const raizLba = u32(pvd, 156 + 2), raizTam = u32(pvd, 156 + 10);
     const raiz = await dadosSetor(f1, raizLba, Math.min(8, Math.ceil(raizTam / 2048)));
@@ -95,12 +100,12 @@ const NucleoT3 = (() => {
       const len = raiz[o];
       if (!len) { o = (Math.floor(o / 2048) + 1) * 2048; continue; }
       const nlen = raiz[o + 32];
-      const nome = new TextDecoder().decode(raiz.subarray(o + 33, o + 33 + nlen)).toUpperCase();
+      const nome = dec.decode(raiz.subarray(o + 33, o + 33 + nlen)).toUpperCase();
       if (nome === 'SYSTEM.CNF;1' || nome === 'SYSTEM.CNF') { cnf = { lba: u32(raiz, o + 2), tam: u32(raiz, o + 10) }; break; }
       o += len;
     }
     if (!cnf) throw new ErroDisco('NAO_E_PS1');
-    const texto = new TextDecoder().decode((await dadosSetor(f1, cnf.lba)).subarray(0, Math.min(cnf.tam, 2048)));
+    const texto = dec.decode((await dadosSetor(f1, cnf.lba)).subarray(0, Math.min(cnf.tam, 2048)));
     /* BOOT = cdrom:\TEKKEN3\SLUS_004.02;1 — vale o nome do arquivo, a pasta não */
     const boot = (texto.match(/BOOT\s*=\s*cdrom:\\?([^;\s]+)/i) || [])[1] || '';
     if (boot.split('\\').pop().toUpperCase() !== EXE) throw new ErroDisco('OUTRO_JOGO', { boot: boot || '?' });
@@ -134,16 +139,19 @@ const NucleoT3 = (() => {
   }
 
   /* --------------------------------------------------- o que vai gravar
-     Devolve [{caminho, dados (Uint8Array) | pedaco}], relativo à raiz do pendrive. */
-  const texto = (s) => new TextEncoder().encode(s);
+     Devolve [{caminho, dados (Uint8Array) | pedaco}], relativo à raiz do pendrive.
+     As faixas vêm primeiro: se o pendrive encher no meio, o ELF e o title.cfg
+     de uma instalação anterior continuam lá, inteiros (o navegador só troca um
+     arquivo quando ele termina de ser gravado). */
+  const texto = (s) => enc.encode(s);
   function arquivosParaGravar({ elf, leiaMe, conferido }) {
-    const lista = [
+    const lista = [{ caminho: PASTA + NOME_F1, pedaco: conferido.f1, crc: conferido.crc1 }];
+    if (conferido.f2) lista.push({ caminho: PASTA + NOME_F2, pedaco: conferido.f2, crc: conferido.crc2 });
+    lista.push(
       { caminho: PASTA + 'tekken3.elf', dados: elf },
       { caminho: PASTA + 'title.cfg', dados: texto(TITLE_CFG) },
       { caminho: PASTA + 'LEIA-ME.txt', dados: texto(leiaMe) },
-      { caminho: PASTA + NOME_F1, pedaco: conferido.f1, crc: conferido.crc1 },
-    ];
-    if (conferido.f2) lista.push({ caminho: PASTA + NOME_F2, pedaco: conferido.f2, crc: conferido.crc2 });
+    );
     return lista;
   }
 

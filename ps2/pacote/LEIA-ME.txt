@@ -36,7 +36,7 @@ LIMITACOES (beta)
 ACHOU UM ERRO?
   https://github.com/portretrogames/tekker3portps2/issues/new?template=erro.yml
   Mande foto da tela e, se puder, o log do pacote de depuracao
-  (RetroGames_Tekken_3_PS2_V60_depuracao.zip, na mesma pagina da versao).
+  (o ZIP que termina em _depuracao, na mesma pagina da versao).
 
 Tekken 3 (c) Bandai Namco Entertainment. Projeto de fas, gratuito, sem ligacao
 com a Bandai Namco.

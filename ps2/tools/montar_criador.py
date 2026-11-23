@@ -20,7 +20,10 @@ CRIADOR = PS2 / "tools" / "criador"
 def main():
     saida = Path(sys.argv[1]) if len(sys.argv) > 1 else PS2 / "build" / "pacote" / "Criar_Tekken3_PS2.html"
     elf = (PS2 / "build" / "pacote" / "APPS" / "TEKKEN3" / "tekken3.elf").read_bytes()
-    versao = re.search(r'#define JOGO_VERSAO_NUM\s+"([^"]+)"', (PS2 / "runtime" / "jogo.h").read_text(encoding="utf-8")).group(1)
+    m = re.search(r'#define JOGO_VERSAO_NUM\s+"([^"]+)"', (PS2 / "runtime" / "jogo.h").read_text(encoding="utf-8"))
+    if not m:
+        raise SystemExit("não achei JOGO_VERSAO_NUM em runtime/jogo.h")
+    versao = m.group(1)
     sha = hashlib.sha256(elf).hexdigest()
     b64 = base64.b64encode(elf).decode()
     b64 = "\n".join(b64[i:i + 120] for i in range(0, len(b64), 120))
@@ -28,6 +31,9 @@ def main():
     leia = json.dumps((PS2 / "pacote" / "LEIA-ME.txt").read_text(encoding="utf-8").replace("\n", "\r\n"))
     leia = leia.replace("</", "<\\/").replace("@", "\\u0040")
     nucleo = (CRIADOR / "nucleo.js").read_text(encoding="utf-8")
+    title = (PS2 / "pacote" / "title.cfg").read_text(encoding="utf-8")
+    if "const TITLE_CFG = '" + title.replace("\n", "\\n") + "'" not in nucleo:
+        raise SystemExit("o TITLE_CFG do nucleo.js é diferente de pacote/title.cfg")
     if "</script" in nucleo.lower() or "@@" in nucleo:
         raise SystemExit("nucleo.js não pode ter </script nem @@")
     html = (CRIADOR / "modelo.html").read_text(encoding="utf-8")

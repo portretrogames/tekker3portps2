@@ -35,7 +35,7 @@ EE_LIBS += -lgskit -ldmakit $(KIT_LIBS) -ldebug -lm
 pacote: all
 	@rm -rf build/pacote && mkdir -p build/pacote/APPS/TEKKEN3
 	$(EE_STRIP) -R .pdr -R .comment -R .mdebug.eabi64 -o build/pacote/APPS/TEKKEN3/tekken3.elf $(EE_BIN)
-	printf 'title=Tekken 3 (port nativo)\nboot=tekken3.elf\n' > build/pacote/APPS/TEKKEN3/title.cfg
+	cp pacote/title.cfg build/pacote/APPS/TEKKEN3/title.cfg
 	cp pacote/LEIA-ME.txt build/pacote/APPS/TEKKEN3/LEIA-ME.txt
 	cp build/pacote/APPS/TEKKEN3/tekken3.elf ../tekken3.elf
 	python3 tools/montar_criador.py build/pacote/Criar_Tekken3_PS2.html

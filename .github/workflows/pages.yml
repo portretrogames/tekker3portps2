@@ -32,14 +32,21 @@ jobs:
           cp -r site/. _site/
           # O criador não fica no código (tem o ELF dentro): é tirado do ZIP da
           # release mais nova (mesmo pré-lançamento) a cada publicação.
+          # Sem o criador a página teria dois links quebrados: aí o job falha e o
+          # site publicado antes continua no ar.
+          rm -rf /tmp/rel && mkdir -p /tmp/rel
           TAG=$(gh release list --repo "$GITHUB_REPOSITORY" --limit 1 --json tagName --jq ".[0].tagName")
-          if [ -n "$TAG" ] && gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern "RetroGames_Tekken_3_PS2_V*.zip" --dir /tmp/rel; then
-            for z in /tmp/rel/*.zip; do
-              case "$z" in *depuracao*) continue;; esac
-              unzip -p "$z" Criar_Tekken3_PS2.html > _site/criador.html && break
-            done
-          fi
-          [ -s _site/criador.html ] || { rm -f _site/criador.html; echo "::warning::o ZIP da release não tem o Criar_Tekken3_PS2.html"; }
+          [ -n "$TAG" ] || { echo "::error::nenhuma release"; exit 1; }
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern "RetroGames_Tekken_3_PS2_V*.zip" --dir /tmp/rel
+          for z in /tmp/rel/*.zip; do
+            [ -f "$z" ] || continue
+            case "$z" in *depuracao*) continue;; esac
+            if unzip -o -q "$z" Criar_Tekken3_PS2.html -d /tmp/rel/x && [ -s /tmp/rel/x/Criar_Tekken3_PS2.html ]; then
+              mv /tmp/rel/x/Criar_Tekken3_PS2.html _site/criador.html
+              break
+            fi
+          done
+          [ -s _site/criador.html ] || { echo "::error::o ZIP da release $TAG não tem o Criar_Tekken3_PS2.html"; exit 1; }
           touch _site/.nojekyll
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
