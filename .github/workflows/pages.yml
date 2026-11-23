@@ -1,12 +1,12 @@
 # Publica a página do port (pasta site/) no GitHub Pages.
-# Roda quando o site muda, quando sai uma release e à mão (Actions > Site > Run workflow).
+# Roda quando o site muda e à mão (Actions > Site > Run workflow). Sem gatilho de
+# release: o ambiente github-pages só aceita o ramo main, e a página busca a versão
+# mais nova sozinha.
 name: Site
 on:
   push:
     branches: [main]
     paths: ["site/**", ".github/workflows/pages.yml"]
-  release:
-    types: [published]
   workflow_dispatch:
 permissions:
   contents: read
