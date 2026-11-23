@@ -8,7 +8,7 @@ body:
       value: |
         Obrigado por ajudar a melhorar o port! Quanto mais detalhe, mais rápido dá para achar o problema.
 
-        **Para anexar fotos, vídeos e arquivos:** arraste para a última caixa (ou clique nela e cole). Aceita imagens, vídeos curtos, `.txt` e `.zip` de até 25 MB.
+        **Para anexar fotos, vídeos e arquivos:** arraste para a última caixa (ou clique nela e cole). Aceita imagens e vídeos curtos de até 10 MB e `.txt` e `.zip` de até 25 MB.
 
         **O log ajuda muito:** baixe também o pacote de **depuração** da mesma versão, abra o `tekken3_depuracao.elf` pelo wLaunchELF, faça o erro acontecer e anexe o `tekken3_log.txt` que ele grava em `APPS/TEKKEN3/`, no pendrive.
   - type: input

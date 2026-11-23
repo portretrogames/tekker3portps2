@@ -17,8 +17,9 @@ Projeto gratuito e sem fins comerciais, da Retrogames Patos de Minas.
 | **`main`** (padrão) | **Versão limpa**, para jogar: só o que o jogo usa, sem log nem painel. |
 | **`depuracao`** | **Versão completa**, para testes: log no pendrive e pela rede, painel de desempenho (L3+R3), contadores do processador e as ferramentas de análise. Parada na V60. |
 
-Cada release traz os dois ELFs: o pacote normal e o de **depuração** (grava o
-`tekken3_log.txt` ao lado do ELF, para anexar quando for reportar um erro).
+Cada release traz dois pacotes: o normal (ramo `main`) e o de **depuração**, compilado do
+ramo `depuracao` (grava o `tekken3_log.txt` ao lado do ELF, para anexar quando for reportar
+um erro). Enquanto o ramo `depuracao` estiver parado, o ELF de depuração é o da V60.
 
 ## Achou um erro?
 

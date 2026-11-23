@@ -226,7 +226,7 @@
     <div class="side">
       <a class="btn red" href="https://github.com/portretrogames/tekker3portps2/issues/new?template=erro.yml">Reportar erro</a>
       <a class="btn ghost" href="https://github.com/portretrogames/tekker3portps2/issues">Ver erros já relatados</a>
-      <p>É preciso uma conta no GitHub (gratuita). Aceita imagens, vídeos curtos, <code>.txt</code> e <code>.zip</code> de até 25 MB.</p>
+      <p>É preciso uma conta no GitHub (gratuita). Aceita imagens e vídeos curtos de até 10 MB e <code>.txt</code> e <code>.zip</code> de até 25 MB.</p>
     </div>
   </div>
 </div></section>
@@ -272,20 +272,28 @@
       if (!r.ok) return;
       const rel = (await r.json())[0];
       if (!rel) return;
-      const zip = (rel.assets || []).find(a => /\.zip$/i.test(a.name) && !/depura/i.test(a.name));
+      // só o pacote para jogar, pelo nome exato (o de depuração e outros extras ficam de fora)
+      const zip = (rel.assets || []).find(a => /^RetroGames_Tekken_3_PS2_V[\d.]+\.zip$/.test(a.name));
       if (zip) document.getElementById("dl").href = zip.browser_download_url;
-      const d = new Date(rel.published_at).toLocaleDateString("pt-BR");
+      const d = rel.published_at ? new Date(rel.published_at).toLocaleDateString("pt-BR") : "";
       const el = document.getElementById("rel");
       el.textContent = "";
       const a = document.createElement("a");
       a.href = rel.html_url; a.textContent = rel.name || rel.tag_name;
-      el.append("Versão mais recente: ", a, " · " + d);
+      el.append("Versão mais recente: ", a, d ? " · " + d : "");
     } catch (e) {}
   })();
-  document.querySelectorAll(".copy").forEach(b => b.addEventListener("click", async () => {
-    const t = document.getElementById(b.dataset.copy).textContent.trim();
-    try { await navigator.clipboard.writeText(t); const o = b.textContent; b.textContent = "Copiado!"; setTimeout(() => b.textContent = o, 1500); } catch (e) {}
-  }));
+  document.querySelectorAll(".copy").forEach(b => {
+    const rotulo = b.textContent;           // texto original, guardado uma vez
+    let timer = 0;
+    b.addEventListener("click", async () => {
+      const t = document.getElementById(b.dataset.copy).textContent.trim();
+      clearTimeout(timer);
+      try { await navigator.clipboard.writeText(t); b.textContent = "Copiado!"; }
+      catch (e) { b.textContent = "Copie a chave ao lado"; }
+      timer = setTimeout(() => b.textContent = rotulo, 1500);
+    });
+  });
 </script>
 </body>
 </html>
