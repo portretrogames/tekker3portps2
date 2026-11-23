@@ -2,10 +2,14 @@
 #include "io.h"
 #include "cpu_state.h"
 #include "ram.h"
+#include "pmc.h"
+#include "quente.h"
 #include "cdrom.h"
 #include "pad.h"
 #include "mdec.h"
 #include "gpu.h"
+#include "som.h"     /* V47 */
+#include "trace_fmv.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -136,8 +140,16 @@ static Timer tmr[3];
  * lógica termina perto do VBlank seguinte e, sem as IRQs extras, o passo de
  * recuperação às vezes não roda e o VBlank se perde. Só ligar quando a lista
  * de desenho sair de dentro da callback (o quadro começaria ~3 ms antes). */
+/* V44: ligado para teste no console. Lá o passo 1 da luta termina ~3 ms
+ * DEPOIS do VBlank seguinte (linha do tempo V42), então o passo de
+ * recuperação continua acontecendo; e nos trechos de 1 passo por quadro
+ * (abertura do round, KO: 19 s no port contra 12,1 s no PS1) as 2-3 voltas
+ * extras da callback (~0,3 ms cada) caem logo no começo do quadro.
+ * V45: confirmado no console (log da V44, 19/11/2026): o jogo vê 1 IRQ do
+ * timer 2 por VBlank (120 em 120, antes ~250), relógio do round 99-100%, luta
+ * em 2 VBlanks por quadro como na V42, interrupção 17% -> 15%. Fica ligado. */
 #ifndef PS2_T2_FIEL
-#define PS2_T2_FIEL 0
+#define PS2_T2_FIEL 1
 #endif
 static unsigned long t_eventos[3], t_entregues[3], t_descartadas[3];
 static unsigned long t_escritas[3];   /* V37: escritas em modo/alvo/contador */
@@ -160,19 +172,61 @@ static uint32_t timer_divisor(int t)
     return 1u;
 }
 
-static uint16_t timer_valor(int t)
+/* Contador do timer 't' como estaria 'adianto' unidades de contagem à frente. */
+static uint16_t timer_valor_em(int t, uint32_t adianto)
 {
-    uint32_t c = (ps2_ps1_cycles() - tmr[t].base) / timer_divisor(t);
+    uint32_t c = (ps2_ps1_cycles() - tmr[t].base) / timer_divisor(t) + adianto;
     if ((tmr[t].modo & (1u << 3)) && tmr[t].alvo)   /* reset no alvo */
         c %= (uint32_t)tmr[t].alvo + 1u;
     return (uint16_t)c;
+}
+static uint16_t timer_valor(int t) { return timer_valor_em(t, 0u); }
+
+/*
+ * V56: esperas da libpad no VBlank. O tratador da libpad do jogo (80092D34)
+ * conversa com os controles esperando tempo real pelo contador do timer 2:
+ * 800951B8 guarda o contador e o prazo, 800951D8 e o laço em 80093584
+ * comparam (pausas de 14-34 us entre bytes e ~95 us de prazo pelo ACK que
+ * não vem: último byte e porta sem controle). No console: 0,5 ms por VBlank
+ * (linha do tempo: "pad troca"/"pad ack").
+ * Enquanto esse tratador roda (bios_hle.c liga), cada leitura do contador
+ * devolve o timer PAD_SALTO unidades mais à frente que a anterior, como se
+ * o tempo tivesse passado: as pausas e os prazos acabam na hora. O valor
+ * continua dando a volta no alvo como o contador de verdade (a libpad soma
+ * o alvo quando o contador volta: o salto tem de ser menor que o alvo).
+ * Exceção — ACK a caminho ou recém-entregue (pad.c: ps2_pad_ack_ocupado):
+ * a leitura não salta, e o tempo segue o real até o jogo ver o ACK (os laços
+ * de 800932A0 e 80093478 testam o prazo ANTES de olhar o I_STAT). A leitura
+ * do contador também não entrega ACK: ver ps2_pad_ack_ocupado.
+ * O que fica adiantado: a pausa antes do 1º byte, o prazo do último byte
+ * (que não tem ACK) e o da porta sem controle.
+ * O timer em si não muda: ao sair do tratador o adianto some.
+ */
+#ifndef PS2_PAD_ADIANTA
+#define PS2_PAD_ADIANTA 1
+#endif
+#define PAD_SALTO 1024u     /* > maior prazo da libpad (430) */
+static int pad_adianta;
+static uint32_t pad_adianto;
+unsigned long g_ps2_pad_adiantos;
+void ps2_timer_pad_adianta(int ligar)
+{
+    pad_adianta = ligar && PS2_PAD_ADIANTA;
+    pad_adianto = 0;
 }
 
 static uint32_t timer_read(uint32_t off)
 {
     int t = (int)((off - 0x100u) >> 4);
     switch (off & 0xFu) {
-    case 0x0: return timer_valor(t);
+    case 0x0:
+        if (t == 2 && pad_adianta) {
+            /* sem reset no alvo o contador dá a volta em 65536: sempre cabe */
+            int cabe = !((tmr[2].modo & (1u << 3)) && tmr[2].alvo) || tmr[2].alvo >= 2u * PAD_SALTO;
+            if (cabe && !ps2_pad_ack_ocupado()) { pad_adianto += PAD_SALTO; g_ps2_pad_adiantos++; }
+            return timer_valor_em(2, pad_adianto);
+        }
+        return timer_valor(t);
     case 0x4: { uint32_t m = tmr[t].modo | (1u << 10);  /* sem IRQ pendente */
                 tmr[t].modo &= ~((1u << 11) | (1u << 12)); return m; }
     case 0x8: return tmr[t].alvo;
@@ -225,6 +279,7 @@ static void timer_write(uint32_t off, uint32_t v)
                * se a última conferência foi antes do cruzamento, se perdiam
                * (o Tekken rearma o timer 2 ~600x/s). */
               ps2_timers_poll();
+              ps2_dma_poll();     /* V48: como antes de separar do timer */
 #if PS2_T2_FIEL
               /* V43: escrita feita DENTRO da callback deste timer (o Tekken
                * desarma o timer 2 no fim de 80029784). No PS1 a callback acaba
@@ -549,6 +604,9 @@ static int dma_gpu(uint32_t off, uint32_t madr, uint32_t bcr, uint32_t chcr)
         ultimas_madr[n_madr++ & 3u] = a;
         pular = ps2_gpu_pular_lista();
         { extern void ps2_diag(unsigned, uint32_t); ps2_diag(12u, a); }
+        {
+        int pmc_ant = pmc_trocar(PMC_LISTA);
+        PS2_PILHA_EM(PMC_PILHA_DESENHO(PS2_PILHA_LISTA));      /* quente.h */
         for (;;) {
             uint32_t cabecalho, n, i;
             if (++nos > limite) break;
@@ -570,6 +628,8 @@ static int dma_gpu(uint32_t off, uint32_t madr, uint32_t bcr, uint32_t chcr)
             a = cabecalho & 0x1ffffcu;
         }
         ps2_gpu_fim_lista(pular);
+        pmc_trocar(pmc_ant);
+        }
         { extern void ps2_diag(unsigned, uint32_t); ps2_diag(13u, nos); }
         if (sig_cand.ok) {                  /* desenhada agora: vira referência */
             sig.valida = !pular;            /* com pulos do orçamento não vale */
@@ -597,6 +657,15 @@ static int dma_gpu(uint32_t off, uint32_t madr, uint32_t bcr, uint32_t chcr)
             printf("gpu: DMA bloco grande demais: %lu x %lu\n",
                    (unsigned long)palavras, (unsigned long)(modo ? blocos : 1u));
             return 0;
+        }
+        /* V48: imagem para a VRAM direto da RAM, sem passar palavra por palavra */
+        while ((chcr & 1u) && passo == 4u && total) {
+            uint32_t ate_fim = (0x200000u - a) / 4u;
+            uint32_t n = total < ate_fim ? (uint32_t)total : ate_fim;
+            unsigned k = ps2_gpu_gp0_imagem(&g_ps1_ram[a], n);
+            if (!k) break;
+            total -= k;
+            a = (a + 4u * k) & 0x1ffffcu;
         }
         while (total--) {
             if (chcr & 1u) ps2_gpu_gp0(ps2_ram_get32(a));
@@ -642,12 +711,12 @@ static void dma_ordering_table(uint32_t madr, uint32_t bcr)
     if ((n - 1u) * 4u <= a) {
         /* não dá a volta nos 2 MB: escreve direto e marca cada grânulo de
          * 64 bytes uma vez (antes marcava a cada palavra) */
-        uint32_t ini = a - (n - 1u) * 4u, m;
+        uint32_t ini = a - (n - 1u) * 4u;
         ps2_u32a *p = (ps2_u32a *)&g_ps1_ram[ini];
         uint32_t k;
         p[0] = 0x00FFFFFFu;
         for (k = 1; k < n; k++) p[k] = ini + (k - 1u) * 4u;
-        for (m = ini & ~63u; m <= a; m += 64u) ps2_cod_marcar(m);
+        ps2_cod_marcar_faixa(ini, n * 4u);
         return;
     }
     while (n--) {
@@ -658,10 +727,46 @@ static void dma_ordering_table(uint32_t madr, uint32_t bcr)
 
 static void dma_irq(uint32_t canal)
 {
+    if (canal <= 1u) TR("dma_irq %u dicr %08x istat %03x", canal, dma_dicr, i_stat);
     if (dma_dicr & (1u << (16 + canal))) {
         dma_dicr |= 1u << (24 + canal);
         if (dma_dicr & (1u << 23))
             ps2_irq_raise(IRQ_DMA);
+    }
+}
+
+/*
+ * V48: o fim do DMA1 (MDEC -> RAM) é avisado um pouco DEPOIS, como no PS1,
+ * e não na hora. O tocador do vídeo pede a saída em 16 faixas por quadro e,
+ * no aviso de cada uma (callback da IRQ do DMA), manda a faixa para a VRAM e
+ * pede a próxima. Com o fim na hora, as 16 faixas rodavam numa única IRQ (o
+ * tratador do libetc vê o flag de novo e repete): ~70 ms no PCSX2 com as
+ * interrupções desligadas, o CD não era atendido e o drive esperava (o vídeo
+ * perdia quadros). Os dados vão para a RAM na hora; só o aviso espera.
+ */
+#define DMA1_CICLOS_POR_PALAVRA 2u
+static int      dma1_fim_pendente;
+static uint32_t dma1_fim_quando;
+
+static void dma1_concluir(void)
+{
+    reg_set(0x098, reg_get(0x098, 4) & ~((1u << 24) | (1u << 28)), 4);
+    dma_irq(1);
+}
+
+static void dma1_agendar(uint32_t palavras)
+{
+    dma1_fim_quando = ps2_ps1_cycles() + palavras * DMA1_CICLOS_POR_PALAVRA;
+    dma1_fim_pendente = 1;
+}
+
+/* V48: chamada a cada conferência de IRQ (irq_poll_corpo em bios_hle.c) */
+void ps2_dma_poll(void)
+{
+    if (dma1_fim_pendente && (int32_t)(ps2_ps1_cycles() - dma1_fim_quando) >= 0) {
+        dma1_fim_pendente = 0;
+        TR("dma1 fim");
+        dma1_concluir();
     }
 }
 
@@ -670,11 +775,16 @@ static void dma_chcr_write(uint32_t off, uint32_t v)
     uint32_t canal = (off - 0x80u) >> 4;
     uint32_t madr = reg_get(off - 8u, 4), bcr = reg_get(off - 4u, 4);
 
+    if (canal <= 1u) TR("dma%u madr %08x bcr %08x chcr %08x", canal, madr, bcr, v);
+    if (canal == 1) dma1_fim_pendente = 0;  /* nova escrita: o aviso antigo não vale */
     if (v & (1u << 24)) {                 /* start/busy */
         if (canal == 0)
             ps2_mdec_dma_in(madr, dma_palavras(bcr, v));
-        else if (canal == 1 && !ps2_mdec_dma_out(madr, dma_palavras(bcr, v))) {
-            reg_set(off, v, 4);           /* espera o MDEC: fica ocupado */
+        else if (canal == 1) {
+            uint32_t pal = dma_palavras(bcr, v);
+            reg_set(off, v, 4);           /* ocupado até o aviso */
+            /* sem dados suficientes, espera o MDEC (ps2_dma_mdec_saida_pronta) */
+            if (ps2_mdec_dma_out(madr, pal)) dma1_agendar(pal);
             return;
         }
         else if (canal == 2 && !dma_gpu(off, madr, bcr, v)) {
@@ -687,18 +797,21 @@ static void dma_chcr_write(uint32_t off, uint32_t v)
             uint32_t bs = bcr & 0xFFFFu, bc = bcr >> 16;
             ps2_cdrom_dma(madr, bs * (bc ? bc : 1u));
         }
-        /* SPU (canal 4) ainda não transfere. */
+        else if (canal == 4)              /* SPU: ainda não transfere (V47: só conta) */
+            ps2_som_dma4(madr, bcr, v);
         v &= ~((1u << 24) | (1u << 28));
         dma_irq(canal);
     }
     reg_set(off, v, 4);
 }
 
-/* O MDEC terminou de entregar a saída que o DMA1 esperava. */
-void ps2_dma_mdec_saida_pronta(void)
+/* O MDEC terminou de entregar a saída que o DMA1 esperava (as 'palavras'
+ * que faltavam): o aviso sai depois do tempo dessas palavras, como quando
+ * os dados já estavam prontos no início. */
+void ps2_dma_mdec_saida_pronta(uint32_t palavras)
 {
-    reg_set(0x098, reg_get(0x098, 4) & ~((1u << 24) | (1u << 28)), 4);
-    dma_irq(1);
+    TR("dma1 pronto");
+    dma1_agendar(palavras);
 }
 
 static uint32_t dma_dicr_read(void);
@@ -709,6 +822,7 @@ static void dma_dicr_write(uint32_t v)
     /* bits 24-30 (flags) são limpos escrevendo 1 */
     uint32_t flags = (dma_dicr & ~v) & 0x7F000000u;
     dma_dicr = (v & 0x00FF803Fu) | flags;
+    TR("dicr <- %08x = %08x", v, dma_dicr);
     /* bit mestre passou de 0 para 1 na escrita: IRQ (achado F6) */
     if (!antes && (dma_dicr_read() >> 31))
         ps2_irq_raise(IRQ_DMA);
@@ -731,6 +845,7 @@ void ps2_io_init(void)
     memset(io_visto, 0, sizeof(io_visto));
     memset(tmr, 0, sizeof(tmr));
     i_stat = i_mask = dma_dicr = 0;
+    dma1_fim_pendente = 0;
     ps2_cdrom_reset();
     ps2_pad_reset();
     ps2_mdec_reset();
@@ -751,9 +866,14 @@ uint32_t ps2_io_read(uint32_t address, unsigned w)
     uint32_t off = (address & 0x1FFFFFFFu) - IO_BASE;
     uint32_t v;
 
+    /* V48: a leitura de I_STAT/DICR/CHCR NÃO conclui o DMA1 vencido: o
+     * tratador de DMA da libetc relê o DICR em laço e voltava a fazer as 16
+     * faixas do quadro numa IRQ só (vídeo da abertura de ~19 para ~15
+     * quadros/s no PCSX2 e falhas no som). O fim sai nas conferências. */
     if (off == 0x070) { ps2_pad_tick(); v = i_stat; }
     else if (off == 0x074) v = i_mask;
-    else if (off == 0x0F4) v = dma_dicr_read();
+    else if (off >= 0x0F4 && off < 0x0F8)       /* DICR: também em 8/16 bits */
+        v = dma_dicr_read() >> (8u * (off - 0x0F4u));
     else if (off >= 0x100 && off < 0x130) v = timer_read(off & ~1u);
     else if (off == 0x814) v = ps2_gpu_status();
     else if (off == 0x810) v = ps2_gpu_read();
@@ -761,10 +881,9 @@ uint32_t ps2_io_read(uint32_t address, unsigned w)
     else if (off == 0x824) v = ps2_mdec_read_status();
     else if (off == 0xDAE)                      /* SPUSTAT espelha SPUCNT */
         v = reg_get(0xDAA, 2) & 0x3Fu;
-    /* ENDX: sem SPU emulado, todas as vozes "já terminaram". Com 0 o driver
-     * de som achava que nada acabava e a tela de título ficava esperando. */
-    else if (off == 0xD9C) v = 0xFFFFu;
-    else if (off == 0xD9E) v = 0x00FFu;
+    /* V53: ENDX e ENVX vêm da SPU2 (spu.c); sem ela, ENDX = todas as vozes
+     * "já terminaram" */
+    else if (off >= 0xC00 && off < 0xE00 && ps2_som_spu_leitura(off, w, &v)) {}
     else if (off >= 0x040 && off < 0x050) v = ps2_pad_read(off, w);
     else if (off >= 0x800 && off < 0x804) {    /* CD-ROM */
         v = ps2_cdrom_read(off - 0x800u);
@@ -784,12 +903,26 @@ void ps2_io_write(uint32_t address, uint32_t v, unsigned w)
 
     anotar(off, 1, v);
     if (off == 0x070) {                                 /* ack: escreve 0 */
+        if ((i_stat & 8u) && !(v & 8u)) TR("ack dma istat %03x", i_stat);
         /* escrita de 8/16 bits só alcança os bits que escreve */
         i_stat &= v | (w == 1 ? ~0xFFu : w == 2 ? ~0xFFFFu : 0u);
         return;
     }
     if (off == 0x074) { i_mask = v & 0x7FFu; return; }
-    if (off == 0x0F4) { dma_dicr_write(v); return; }
+    if (off >= 0x0F4 && off < 0x0F8) {                 /* DICR */
+        /* O libcd liga/desliga a IRQ do DMA3 escrevendo só o byte 2 (bits
+         * 16-23, 1F8010F6) antes de cada transferência: só a do último setor
+         * de um quadro do vídeo avisa no fim (callback 800858B8, "quadro
+         * completo"). Antes 1F8010F6 caía num registrador qualquer, a IRQ do
+         * DMA3 ficava sempre ligada e cada setor virava um quadro completo;
+         * na 1a perda de setor o anel do vídeo travava e a abertura pulava
+         * para a tela de seleção. Os bytes não escritos mantêm o valor; nos
+         * flags (24-30, escrever 1 limpa) vai 0 para não reconhecer nada. */
+        uint32_t sh = 8u * (off - 0x0F4u);
+        uint32_t m = (w == 1 ? 0xFFu : w == 2 ? 0xFFFFu : 0xFFFFFFFFu) << sh;
+        dma_dicr_write((dma_dicr & 0x00FFFFFFu & ~m) | ((v << sh) & m));
+        return;
+    }
     if (off >= 0x080 && off < 0x0F0 && (off & 0xFu) == 0x8u) {
         dma_chcr_write(off, v);
         return;
@@ -801,5 +934,7 @@ void ps2_io_write(uint32_t address, uint32_t v, unsigned w)
     if (off == 0x814) { ps2_gpu_gp1(v); return; }
     if (off == 0x820) { ps2_mdec_write_data(v); return; }
     if (off == 0x824) { ps2_mdec_write_control(v); return; }
+    if (off >= 0xC00u && off < 0x1000u)                 /* SPU: V47 só conta (som.c) */
+        ps2_som_spu_escrita(off, v, w);
     reg_set(off, v, w);
 }

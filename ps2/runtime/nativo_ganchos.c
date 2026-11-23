@@ -13,26 +13,57 @@
 #include <stdint.h>
 #include "cpu_state.h"
 #include "ram.h"
+#include "prof.h"
+#include "nativo_overlay.h"
+#include "pmc.h"
+#include "quente.h"
 
 static uint32_t g_nat_end[32], g_nat_n[32], g_nat_max[32];
 static unsigned long long g_nat_ciclos[32];
+/* V46: quanto do tempo de cada rotina nativa foi dentro do GTE (gte.c soma
+ * os ciclos de cada comando em g_prof_gte). Separa o custo do GTE do custo
+ * de memória/laços da própria rotina. */
+static unsigned long long g_nat_gte[32];
 int g_ps2_nat_ligado = 1;
 unsigned long g_ps2_nat_chamadas;
 
+/* V56: acesso direto (nativas, pilha do código gerado) fora da janela RAM+scratchpad, ou desalinhado
+ * (runtime/janela.h). Tem que ficar em 0: senão a rotina não pode usar o
+ * acesso direto. */
+unsigned long g_ps2_janela_fora;
+void ps2_janela_fora(uint32_t endereco, unsigned bytes)
+{
+    if (g_ps2_janela_fora++ < 40u)
+        printf("janela: acesso de %u bytes FORA em %08lx\n", bytes, (unsigned long)endereco);
+}
+
 #ifdef PS2_NAT_VERIFICAR
 extern int psx_dispatch_game_compiled(CPUState *cpu, uint32_t addr);
-extern uint8_t g_ps2_scratchpad[1024];
+/* g_ps2_scratchpad: ram.h */
 extern int g_ps2_contagem_irq;
 static uint8_t ram_s[0x200000], ram_a[0x200000];
 static uint8_t spad_s[1024], spad_a[1024];
 static unsigned n_verif, n_dif;
 
-static void verificar(CPUState *cpu, uint32_t ini, void (*nat)(CPUState *))
+/* original de uma rotina do executável: despacha até voltar para quem chamou */
+static unsigned original_despacho(CPUState *cpu, uint32_t ini, uint32_t ret)
+{
+    uint32_t pc = ini;
+    unsigned passos = 0;
+    do {
+        if (!psx_dispatch_game_compiled(cpu, pc)) { printf("nativo: %08lx original saiu do despacho em %08lx\n", (unsigned long)ini, (unsigned long)pc); break; }
+        pc = cpu->pc;
+    } while (pc != ret && ++passos < 1000000u);
+    return passos;
+}
+
+static void verificar(CPUState *cpu, uint32_t ini, void (*nat)(CPUState *),
+                      unsigned (*original)(CPUState *, uint32_t, uint32_t))
 {
     CPUState salvo = *cpu, a;
-    uint32_t ret = cpu->gpr[31], pc;
+    uint32_t ret = cpu->gpr[31];
     int cont = g_ps2_contagem_irq;
-    unsigned i, passos = 0;
+    unsigned i, passos;
     memcpy(ram_s, g_ps1_ram, sizeof ram_s);
     memcpy(spad_s, g_ps2_scratchpad, sizeof spad_s);
     nat(cpu);
@@ -42,19 +73,16 @@ static void verificar(CPUState *cpu, uint32_t ini, void (*nat)(CPUState *))
     *cpu = salvo;
     memcpy(g_ps1_ram, ram_s, sizeof ram_s);
     memcpy(g_ps2_scratchpad, spad_s, sizeof spad_s);
-    /* original: despacha até voltar para quem chamou, sem interrupções */
+    /* original até voltar para quem chamou, sem interrupções */
     g_ps2_nat_ligado = 0;
     g_ps2_contagem_irq = 1 << 30;
-    pc = ini;
-    do {
-        if (!psx_dispatch_game_compiled(cpu, pc)) { printf("nativo: %08lx original saiu do despacho em %08lx\n", (unsigned long)ini, (unsigned long)pc); break; }
-        pc = cpu->pc;
-    } while (pc != ret && ++passos < 1000000u);
+    passos = original(cpu, ini, ret);
     g_ps2_contagem_irq = cont;
     g_ps2_nat_ligado = 1;
     n_verif++;
     {
         int dif = 0;
+        if (a.pc != cpu->pc || a.cop0[12] != cpu->cop0[12]) { dif = 1; printf("nativo: %08lx DIFERENTE pc/SR nat=%08lx/%08lx orig=%08lx/%08lx\n", (unsigned long)ini, (unsigned long)a.pc, (unsigned long)a.cop0[12], (unsigned long)cpu->pc, (unsigned long)cpu->cop0[12]); }
         for (i = 0; i < 32 && !dif; i++)
             if (a.gpr[i] != cpu->gpr[i]) { dif = 1; printf("nativo: %08lx DIFERENTE gpr[%u] nat=%08lx orig=%08lx\n", (unsigned long)ini, i, (unsigned long)a.gpr[i], (unsigned long)cpu->gpr[i]); }
         if (!dif && (a.hi != cpu->hi || a.lo != cpu->lo)) { dif = 1; printf("nativo: %08lx DIFERENTE hi/lo\n", (unsigned long)ini); }
@@ -72,8 +100,11 @@ static void verificar(CPUState *cpu, uint32_t ini, void (*nat)(CPUState *))
 }
 #endif
 
-/* Chamado pelos ganchos gerados em build/r/nativo.c. */
-int ps2_nat_executar(CPUState *cpu, uint32_t ini, void (*nat)(CPUState *))
+#ifdef PS2_NAT_VERIFICAR
+extern unsigned ps2_interp_ate(CPUState *cpu, uint32_t pc, uint32_t ret);
+#endif
+
+static int executar(CPUState *cpu, uint32_t ini, void (*nat)(CPUState *), int overlay)
 {
     if (!g_ps2_nat_ligado) return 0;
     g_ps2_nat_chamadas++;
@@ -84,22 +115,40 @@ int ps2_nat_executar(CPUState *cpu, uint32_t ini, void (*nat)(CPUState *))
         for (k = 0; k < 32u && quem[k] && quem[k] != ini; k++) ;
         if (k < 32u) {
             quem[k] = ini;
-            if (quantas[k] < 25u) { quantas[k]++; verificar(cpu, ini, nat); return 1; }
+            if (quantas[k] < 25u) {
+                quantas[k]++;
+                verificar(cpu, ini, nat, overlay ? ps2_interp_ate : original_despacho);
+                return 1;
+            }
         }
     }
+#else
+    (void)overlay;
 #endif
-#ifdef _EE
+#if defined(_EE) && defined(PS2_LIMPO)
+    {   /* V58: versão limpa, sem medir */
+        int pr = pmc_trocar(PMC_NATIVAS);
+        PS2_PILHA_EM(PMC_PILHA_DESENHO(PS2_PILHA_NATIVAS));    /* quente.h */
+        nat(cpu);
+        pmc_trocar(pr);
+    }
+#elif defined(_EE)
     {   /* V32: tempo total, maior chamada e contagem por rotina nativa */
         static uint32_t quem_t[32];
-        unsigned k; uint32_t t0, t1;
+        unsigned k; uint32_t t0, t1; int pr;
+        unsigned long long g0 = g_prof_gte;
         for (k = 0; k < 32u && quem_t[k] && quem_t[k] != ini; k++) ;
+        pr = pmc_trocar(PMC_NATIVAS);
+        PS2_PILHA_EM(PMC_PILHA_DESENHO(PS2_PILHA_NATIVAS));    /* quente.h */
         __asm__ volatile("mfc0 %0, $9" : "=r"(t0));
         nat(cpu);
         __asm__ volatile("mfc0 %0, $9" : "=r"(t1));
+        pmc_trocar(pr);
         if (k < 32u) {
             uint32_t d = t1 - t0;
             quem_t[k] = ini; g_nat_end[k] = ini;
             g_nat_ciclos[k] += d; g_nat_n[k]++;
+            g_nat_gte[k] += g_prof_gte - g0;
             if (d > g_nat_max[k]) g_nat_max[k] = d;
         }
     }
@@ -107,6 +156,19 @@ int ps2_nat_executar(CPUState *cpu, uint32_t ini, void (*nat)(CPUState *))
     nat(cpu);
 #endif
     return 1;
+}
+
+/* Chamado pelos ganchos gerados em build/r/nativo.c. */
+int ps2_nat_executar(CPUState *cpu, uint32_t ini, void (*nat)(CPUState *))
+{
+    return executar(cpu, ini, nat, 0);
+}
+
+/* V48: rotina de overlay (runtime/interp.c); na verificação o original roda
+ * no interpretador. */
+int ps2_nat_executar_overlay(CPUState *cpu, uint32_t ini, void (*nat)(CPUState *))
+{
+    return executar(cpu, ini, nat, 1);
 }
 
 /* V36: sem som no port -> pula o tick do sequenciador de som (80088BA8).
@@ -137,13 +199,19 @@ int ps2_som_pular(CPUState *cpu)
 static uint32_t dg_t[DIAG_N], dg_a[DIAG_N];
 static uint8_t  dg_e[DIAG_N];
 static uint32_t dg_i;
+#if defined(PS2_TRAB_QUADRO) && defined(_EE)
+static void trab_evento(unsigned e, uint32_t t);
+#endif
 void ps2_diag(unsigned e, uint32_t a)
 {
-#ifdef _EE
+#if defined(_EE) && !defined(PS2_LIMPO)
     uint32_t t, k;
     __asm__ volatile("mfc0 %0, $9" : "=r"(t));
     k = dg_i++ & (DIAG_N - 1u);
     dg_t[k] = t; dg_e[k] = (uint8_t)e; dg_a[k] = a;
+#ifdef PS2_TRAB_QUADRO
+    trab_evento(e, t);
+#endif
 #else
     (void)e; (void)a;
 #endif
@@ -153,7 +221,7 @@ static const char *const dg_nome[] = {
     "handler ini", "handler fim", "espera ini", "espera fim", "luta",
     "lista ini", "lista fim", "copia GS ini", "copia GS fim", "exc saida jogo",
     "vsync cb", "OTC", "OTC n", "checa recup", "relat ini", "relat fim",
-    "CD le", "CD espera"
+    "CD le", "CD espera", "som espera", "som reserva", "pad troca", "pad ack"
 };
 static void diag_despejar_ate(uint32_t fim, unsigned n);
 void ps2_diag_despejar(unsigned n) { diag_despejar_ate(dg_i, n); }
@@ -184,7 +252,46 @@ static void diag_despejar_ate(uint32_t fim, unsigned n)
     }
 }
 void ps2_diag_luta(void) { ps2_diag(11, 0); }
-void ps2_diag_espera_fim(void) { ps2_diag(10, ps2_ram_get32(0x8009bc5cu)); }
+/* V60: TRAB_QUADRO=1 grava o trabalho de cada quadro (fim da espera do VBlank
+ * até o começo da seguinte, com as interrupções no meio) e o relatório de ~2 s
+ * imprime a sequência em décimos de ms ("trab:"). Mostra se os quadros que
+ * passam de 16,7 ms vêm isolados (a folga do vizinho daria para eles) ou em fila. */
+#if defined(PS2_TRAB_QUADRO) && defined(_EE)
+#define TRAB_N 512u
+static uint16_t trab_v[TRAB_N];
+static unsigned trab_n;
+#endif
+void ps2_diag_espera_fim(void) { pmc_trocar(PMC_JOGO); ps2_diag(10, ps2_ram_get32(0x8009bc5cu)); }
+#if defined(PS2_TRAB_QUADRO) && defined(_EE)
+/* Chamado por ps2_diag a cada evento. O Tekken roda parte da lógica dentro das
+ * interrupções enquanto o laço principal espera: ocioso = tempo na espera
+ * (espera ini -> espera fim) menos as exceções que caem nela; trabalho do
+ * quadro = período (espera fim -> espera fim) menos o ocioso. Fica contado como
+ * ocioso o que roda na espera fora das exceções: 80029A28 (chamada na entrada de
+ * 800296C4) e a decodificação da música (ps2_som_ocioso): o trabalho sai um pouco
+ * menor que o real. A duração (período) de cada quadro é exata. */
+static void trab_evento(unsigned e, uint32_t t)
+{
+    static uint32_t esp_ini, exc_ini, irq_esp, fim_ant;
+    static int na_espera, na_exc;
+    switch (e) {
+    case 9:  esp_ini = t; irq_esp = 0; na_espera = 1; na_exc = 0; break; /* espera ini */
+    case 5:  if (na_espera) { exc_ini = t; na_exc = 1; } break;         /* exc entra */
+    case 6:  if (na_exc && na_espera) irq_esp += t - exc_ini; na_exc = 0; break;
+    case 10:                                                            /* espera fim */
+        if (na_espera && fim_ant) {
+            uint32_t esp = t - esp_ini, p = t - fim_ant;
+            uint32_t ocioso = irq_esp < esp ? esp - irq_esp : 0u, w = ocioso < p ? p - ocioso : 0u;
+            w /= 29491u; p /= 29491u;                                   /* décimos de ms */
+            if (trab_n + 1u < TRAB_N) {
+                trab_v[trab_n++] = (uint16_t)(w > 9999u ? 9999u : w);
+                trab_v[trab_n++] = (uint16_t)(p > 9999u ? 9999u : p);
+            }
+        }
+        fim_ant = t; na_espera = 0; break;
+    }
+}
+#endif
 /* V42: 800295F4 = "passaram 2+ IRQs do timer 2 desde o início do quadro?"
  * (decide o passo de recuperação da lógica, sem desenho). Registra o valor
  * do contador 8009BC5C que o jogo vai comparar. */
@@ -198,6 +305,7 @@ uint32_t g_ps2_quadros_ult;          /* V43: quadros do jogo no último relatór
 void ps2_quadro_espera(void)
 {
     ps2_diag(9, ps2_ram_get32(0x8009bc5cu));   /* V41: passos do timer no quadro */
+    pmc_trocar(PMC_ESPERA);
 #ifdef _EE
     uint32_t t, d;
     __asm__ volatile("mfc0 %0, $9" : "=r"(t));
@@ -215,14 +323,49 @@ void ps2_quadro_espera(void)
     if (d > q_max) q_max = d;
 #endif
 }
+/* V55: valor devolvido pela lógica 8002AE58 no laço 800508C4 (s0): 1 = luta,
+ * 0 = apresentação do round (ROUND 1 / READY? / FIGHT), 2/4/6 = fim do round.
+ * Só com 1 o jogo roda o passo de recuperação sem desenho (no PS1 a
+ * apresentação cabia em 1 VBlank e não precisava). No PS2 cada imagem ainda
+ * leva 2 VBlanks e a apresentação andava na metade da velocidade, com as falas
+ * junto; com RECUP_APRES=1 a recuperação vale também para o 0.
+ * Devolve 1 = sem recuperação. */
+#ifndef PS2_RECUP_APRES
+#define PS2_RECUP_APRES 0
+#endif
+static unsigned long r_ret[17];
+int ps2_luta_sem_recup(CPUState *cpu)
+{
+    uint32_t v = cpu->gpr[16];          /* s0 = o que 8002AE58 devolveu */
+    r_ret[v < 16u ? v : 16u]++;
+    if (v == 1u) return 0;
+#if PS2_RECUP_APRES
+    /* o jogo grava s0 na marca 800ADCA4 ("passo sem desenho"): com 0 a marca
+     * não ligava e o laço repetia passos com desenho até o jogo cair; vira 1
+     * (a chamada seguinte de 8002AE58 escreve s0 de novo) */
+    if (v == 0u) { cpu->gpr[16] = 1u; return 0; }
+#endif
+    return 1;
+}
 void ps2_quadro_relatorio(void)
 {
+    unsigned k;
+    printf("luta: retornos de 8002AE58:");
+    for (k = 0; k < 17u; k++) if (r_ret[k]) printf(" %u:%lu", k, r_ret[k]);
+    printf("\n");
+    memset(r_ret, 0, sizeof(r_ret));
     g_ps2_quadros_ult = q_n;
     printf("quadros: %lu (1 VBlank %lu, 2 VBlanks %lu, 3+ %lu), pior %lu.%lu ms\n",
            (unsigned long)q_n, (unsigned long)q_1vb, (unsigned long)q_2vb,
            (unsigned long)q_3vb, (unsigned long)(q_max / 294912u),
            (unsigned long)((q_max % 294912u) * 10u / 294912u));
     q_n = q_1vb = q_2vb = q_3vb = q_max = 0;
+#if defined(PS2_TRAB_QUADRO) && defined(_EE)
+    printf("trab:");                                    /* trabalho/período por quadro */
+    for (k = 0; k + 1u < trab_n; k += 2u) printf(" %u/%u", (unsigned)trab_v[k], (unsigned)trab_v[k + 1u]);
+    printf("\n");
+    trab_n = 0;
+#endif
 }
 
 /* V32: uma linha por período no log (video_gs.c) */
@@ -235,7 +378,14 @@ void ps2_nat_relatorio(unsigned long long total)
         printf(" %08lx:%llu%%/%lu/%lu", (unsigned long)g_nat_end[k],
                total ? g_nat_ciclos[k] * 100ull / total : 0ull,
                (unsigned long)g_nat_n[k], (unsigned long)(g_nat_max[k] / 294u));
-        g_nat_ciclos[k] = 0; g_nat_n[k] = 0; g_nat_max[k] = 0;
+    }
+    printf("\n");
+    /* V46: parte de cada rotina que foi GTE (o resto é memória e laços dela) */
+    printf("nativas gte (%% do tempo de cada rotina dentro do GTE):");
+    for (k = 0; k < 32u && g_nat_end[k]; k++) {
+        if (g_nat_n[k] && g_nat_ciclos[k])
+            printf(" %08lx:%llu%%", (unsigned long)g_nat_end[k], g_nat_gte[k] * 100ull / g_nat_ciclos[k]);
+        g_nat_ciclos[k] = 0; g_nat_n[k] = 0; g_nat_max[k] = 0; g_nat_gte[k] = 0;
     }
     printf("\n");
 }
@@ -307,3 +457,4 @@ const char *ps2_relogio_relatorio(void)
              (unsigned long)(g_ps2_quadros_ult / 2u), jan, rl_rodada);
     return rl_painel;
 }
+

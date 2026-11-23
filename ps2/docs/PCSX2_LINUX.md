@@ -77,7 +77,7 @@ No WSL com WSLg dá para pular: a janela aparece no Windows.
 ```bash
 cd ~/work/squashfs-root
 ./usr/bin/pcsx2-qt -earlyconsolelog -logfile ~/work/emu.log -batch -fastboot \
-    -- "/caminho/tekken 3 ps2/ps2/tekken3.elf" &
+    -- "/caminho/tekken 3 ps2/Codigo/ps2/tekken3.elf" &
 sleep 60
 LD_LIBRARY_PATH= import -window root tela.png
 kill -9 %1

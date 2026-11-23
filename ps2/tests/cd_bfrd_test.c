@@ -2,9 +2,11 @@
  * Setores sintéticos, sem dados do jogo. Agora exige PROGRESSO. */
 #include <assert.h>
 #include "../runtime/cdrom.c"
-uint8_t g_ps1_ram[PS2_RAM_SIZE];
+uint8_t g_ps2_janela[PS2_JANELA_TAM];
 uint32_t g_cod_ini, g_cod_tam;
 uint8_t g_cod_sujo[4096];
+uint8_t g_cod_pag[PS2_RAM_SIZE >> PS2_COD_PAG_BITS];
+void ps2_cod_marcar_lento(uint32_t addr) { (void)addr; }
 void ps2_irq_raise(unsigned bit) { (void)bit; }
 
 static FILE *disco_sintetico(const uint8_t *marcas, const uint8_t *xa, unsigned n)

@@ -1,13 +1,31 @@
 /* ram.c — RAM principal do PS1 (ver ram.h). */
 #include "ram.h"
+#include "quente.h"
 
 #include <string.h>
 
-uint8_t g_ps1_ram[PS2_RAM_SIZE] __attribute__((aligned(64)));
+/* V56: janela única da RAM e do scratchpad (ver ram.h: g_ps1_ram e
+ * g_ps2_scratchpad são macros para dentro dela). Alinhada em 4 KB (ram.h:
+ * lugar fixo no cache de dados). */
+uint8_t g_ps2_janela[PS2_JANELA_TAM] __attribute__((aligned(4096)));
+_Static_assert(PS2_JANELA_SPAD >= PS2_RAM_SIZE && (PS2_JANELA_MASK & 0x1F800000u) == PS2_JANELA_SPAD,
+               "scratchpad (0x1F800000) & máscara cai no começo dele na janela");
+
+/* V56: bloco quente (ram.h: lugar fixo no cache de dados). O estado da CPU
+ * do PS1 (g_ps2_cpu, usado por main.c) e o mapa de páginas com código
+ * (g_cod_pag) são apelidos para dentro dele. */
+#define RAM_STR2(x) #x
+#define RAM_STR(x) RAM_STR2(x)
+PS2_QUENTE uint8_t g_ps2_quente[4096] __attribute__((aligned(4096)));   /* 1º da seção .bss.quente (quente.h) */
+typedef char cod_pag_cabe[(PS2_COD_PAG_NO_CACHE + (PS2_RAM_SIZE >> PS2_COD_PAG_BITS) <= 4096u) ? 1 : -1];
+__asm__("\t.globl g_ps2_cpu\n"
+        "\t.set g_ps2_cpu, g_ps2_quente + " RAM_STR(PS2_CPU_NO_CACHE) "\n"
+        "\t.globl g_cod_pag\n"
+        "\t.set g_cod_pag, g_ps2_quente + " RAM_STR(PS2_COD_PAG_NO_CACHE) "\n");
 
 void ps2_ram_clear(void)
 {
-    memset(g_ps1_ram, 0, sizeof(g_ps1_ram));
+    memset(g_ps1_ram, 0, PS2_RAM_SIZE);
 }
 
 uint8_t *ps2_ram_data(void)

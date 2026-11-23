@@ -10,6 +10,7 @@
 #include <loadfile.h>
 #include <iopcontrol.h>
 #include <sbv_patches.h>
+#include "kit/diagnostico.h"     /* kit_relogio, kit_ms_desde */
 extern int fileXioInit(void);     /* o header do fileXio proíbe uso junto da newlib */
 
 static char mensagens[1024];
@@ -44,24 +45,57 @@ static int carregar(const char *nome, unsigned char *irx, unsigned int tam)
     return 1;
 }
 
+/* kit_ms_desde vale para menos de 14 s: espera em fatias de até 1 s */
 static void esperar_ms(unsigned ms)
 {
-    uint32_t ini, agora;
-    __asm__ volatile("mfc0 %0, $9" : "=r"(ini));
-    do __asm__ volatile("mfc0 %0, $9" : "=r"(agora));
-    while ((uint32_t)(agora - ini) < ms * 294912u);
+    while (ms) {
+        unsigned f = ms < 1000u ? ms : 1000u;
+        uint32_t ini = kit_relogio();
+        while (kit_ms_desde(ini) < f) {}
+        ms -= f;
+    }
+}
+
+/* Soma o tempo desde *ini em *passado (relendo a cada <1 s, sem estouro) e
+ * diz se o prazo acabou. */
+static int prazo_esgotado(uint32_t *ini, unsigned *passado, unsigned prazo_ms)
+{
+    unsigned dt = kit_ms_desde(*ini);
+    if (dt >= 1000u) { *passado += dt; *ini = kit_relogio(); dt = 0; }
+    return *passado + dt >= prazo_ms;
+}
+
+/* "host:" ou "host0:".."host9:" (o PCSX2 passa host:/caminho/do/elf) */
+static int eh_host(const char *s)
+{
+    if (!s || strncmp(s, "host", 4) != 0) return 0;
+    s += 4;
+    if (*s >= '0' && *s <= '9') s++;
+    return *s == ':';
+}
+
+/* 0.2.1: reset e sincronização do IOP com prazo (antes laços sem fim).
+ * O tempo é somado em ms (sem estouro para qualquer prazo). */
+static int iop_reiniciar(unsigned prazo_ms)
+{
+    unsigned passado = 0;
+    uint32_t ini = kit_relogio();
+    while (!SifIopReset("", 0))
+        if (prazo_esgotado(&ini, &passado, prazo_ms)) { msg("iop: SifIopReset sem resposta\n"); return 0; }
+    while (!SifIopSync())
+        if (prazo_esgotado(&ini, &passado, prazo_ms)) { msg("iop: SifIopSync sem resposta\n"); return 0; }
+    return 1;
 }
 
 int kit_arm_preparar(const char *argv0, int forcar_usb)
 {
-    if (!forcar_usb && argv0 && strncmp(argv0, "host", 4) == 0) {
+    if (!forcar_usb && eh_host(argv0)) {
         msg("iop: rodando de host: (PCSX2), IOP mantido\n");
         return KIT_ARM_HOST;
     }
     msg("iop: reiniciando o IOP e carregando USB (FAT32/exFAT)\n");
     SifInitRpc(0);
-    while (!SifIopReset("", 0)) {}
-    while (!SifIopSync()) {}
+    if (!iop_reiniciar(10000u)) return KIT_ARM_ERRO_MODULO;
     SifInitRpc(0);
     sbv_patch_enable_lmb();
     sbv_patch_disable_prefix_check();
@@ -85,7 +119,7 @@ int kit_arm_esperar(const char *const *caminhos, unsigned timeout_ms,
                     char *achado, size_t tam)
 {
     unsigned t;
-    for (t = 0; t <= timeout_ms; t += 100u) {
+    for (t = 0;;) {
         unsigned k;
         for (k = 0; caminhos && caminhos[k]; k++) {
             FILE *f = fopen(caminhos[k], "rb");
@@ -99,7 +133,12 @@ int kit_arm_esperar(const char *const *caminhos, unsigned timeout_ms,
                 return KIT_ARM_OK;
             }
         }
-        esperar_ms(100);
+        if (t >= timeout_ms) break;            /* última volta: sem espera depois */
+        {   /* espera 100 ms ou o resto do prazo; a última volta cai no prazo */
+            unsigned passo = timeout_ms - t < 100u ? timeout_ms - t : 100u;
+            esperar_ms(passo);
+            t += passo;
+        }
     }
     msg("iop: nenhum arquivo encontrado em %u ms\n", timeout_ms);
     return KIT_ARM_NAO_ACHOU;

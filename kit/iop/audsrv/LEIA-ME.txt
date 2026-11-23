@@ -1,0 +1,26 @@
+audsrv (servidor de áudio do IOP) do ps2-port-kit
+
+Copiado do port SMW PS2 (Retrogames, pasta Fonte/audsrv) em 20/11/2026 para o
+módulo "som" do kit (kit/som.h); kit/kit.mk compila e embute no ELF.
+
+Origem: PS2SDK, pasta iop/sound/audsrv, commit
+b12f8af37bd42ec13b1bafb7ab6e7bdcfb4b683b (o mesmo do ps2dev v2.0.0).
+Licença: GNU Library General Public License 2 (LICENCA-LGPL-2.txt nesta pasta).
+Sem as mudanças abaixo, este código gera um audsrv.irx idêntico byte a byte
+ao que vem no ps2dev v2.0.0.
+
+Mudanças:
+1. (port SMW PS2, 2026) em src/audsrv.c, update_volume() grava no volume de
+   entrada do PCM (BVOL) o valor da API mapeado de 0..0x3fff para 0..0x7fff.
+   Os registradores de entrada do SPU2 vão até 0x7fff (o próprio audsrv usa
+   0x7fff no AVOL); com 0x3fff o som saía com metade da amplitude (cerca de
+   -6 dB). O volume master continua em 0x3fff. Achado do port
+   github.com/blashy101/-AI-Super-Mario-World-PS2-Native-Port.
+2. (kit, 20/11/2026) em src/rpc_server.c, AUDSRV_PLAY_AUDIO: o tamanho do PCM
+   declarado no pacote não passa do que chegou pelo RPC (pacote sem o
+   cabeçalho de 4 bytes: tamanho 0).
+3. (kit, 20/11/2026) Makefile: as dependências dos .o usam as pastas
+   IOP_SRC_DIR/IOP_INC_DIR e o próprio Makefile (kit.mk chama este Makefile
+   de outra pasta).
+
+No SMW PS2, o Makefile da pasta Fonte compila este módulo e o embute no SMW.ELF.

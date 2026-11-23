@@ -1,4 +1,6 @@
 /* bios_hle.c — ver bios_hle.h. */
+#include "cartao_ps1.h"
+#include "pmc.h"
 #include "bios_hle.h"
 #include "io.h"
 #include "cdrom.h"
@@ -6,6 +8,9 @@
 #include "video_gs.h"
 #include "gpu.h"
 #include "pad.h"
+#include "som.h"
+#include "jogo.h"
+#include "trace_fmv.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -159,6 +164,7 @@ extern void ps2_diag(unsigned, uint32_t);
 static void chamar_jogo(CPUState *cpu, uint32_t func, uint32_t a0)
 {
     ps2_diag(7u, func);
+    ps2_timer_pad_adianta(func == JOGO_PAD_VBLANK);
     cpu->gpr[4]  = a0;
     cpu->gpr[29] = PILHA_EXC;
     cpu->gpr[31] = RET_MAGICO;
@@ -237,15 +243,38 @@ static void continuar_excecao(CPUState *cpu)
  * reconhecer a escrita no modo feita pela própria callback do timer. */
 unsigned g_ps2_tmr_servindo;
 
+/* V47: o laço da espera do quadro (800296C4: chama 8004CE54 e confere
+ * 8009BC5C até a IRQ do timer 2 liberar o passo seguinte). Conferência de
+ * IRQ com o PC num destes = o jogo está parado esperando.
+ * NÃO é tempo livre o laço de 80029A28, que a espera chama antes (com
+ * 8009542C ligado): ele faz trabalho do jogo enquanto 80029674 diz que o
+ * contador do timer 2 ainda não chegou no limite. Decodificar lá (testado no
+ * PCSX2) tirou o tempo do jogo: relógio do round 99% -> 93%. */
+#define PC_ESPERA_A 0x80029720u          /* volta do laço */
+#define PC_ESPERA_B 0x80029728u          /* retorno de 8004CE54 */
+#define PC_ESPERA_C 0x8004CE54u          /* entrada de 8004CE54 (chamada pelo laço: $ra = B) */
+extern int g_ps2_contagem_irq;           /* stubs.c */
+static int pmc_antes_exc;                 /* região do pmc.h antes da exceção */
+static int na_espera(const CPUState *cpu, uint32_t pc)
+{
+    return pc == PC_ESPERA_A || pc == PC_ESPERA_B ||
+           (pc == PC_ESPERA_C && cpu->gpr[31] == PC_ESPERA_B);
+}
+
 static void return_from_exception(CPUState *cpu)
 {
     ps2_diag(6u, salvo_epc);
+    pmc_trocar(pmc_antes_exc);
     g_ps2_tmr_servindo = 0;
     memcpy(cpu->gpr, salvo_gpr, sizeof(salvo_gpr));
     cpu->hi = salvo_hi; cpu->lo = salvo_lo;
     cpu->cop0[12] = salvo_sr;
     cpu->pc = salvo_epc;
     em_excecao = 0;
+    /* V47: volta para o laço da espera do quadro (depois da IRQ do VBlank,
+     * ~1,2 ms antes da IRQ do timer 2) com música na fila: confere logo, e
+     * ps2_irq_poll decodifica já (antes esperava 256 conferências, ~0,8 ms) */
+    if (na_espera(cpu, salvo_epc) && ps2_som_pendente()) g_ps2_contagem_irq = 1;
 #ifdef _EE
     { extern unsigned long long g_ps2_exc_ciclos; extern uint32_t g_ps2_exc_ini; uint32_t c;
       __asm__ volatile("mfc0 %0, $9" : "=r"(c)); g_ps2_exc_ciclos += (uint32_t)(c - g_ps2_exc_ini);
@@ -275,6 +304,10 @@ static void sair_da_excecao(CPUState *cpu)
 static void entrar_na_excecao(CPUState *cpu, uint32_t pc)
 {
     ps2_diag(5u, ps2_irq_pending());
+    pmc_antes_exc = pmc_trocar(PMC_IRQ);
+#ifdef PS2_TRACE_FMV
+    if (ps2_irq_pending() & 8u) TR("exc dma pend %03x pc %08x", ps2_irq_pending(), pc);
+#endif
     memcpy(salvo_gpr, cpu->gpr, sizeof(salvo_gpr));
     salvo_hi = cpu->hi; salvo_lo = cpu->lo;
     salvo_epc = pc;
@@ -329,10 +362,19 @@ void ps2_irq_poll(CPUState *cpu, uint32_t pc)
     irq_poll_corpo(cpu, pc, &entrar);
     g_prof_irq += (uint32_t)(prof_agora() - t0);
     if (entrar) entrar_na_excecao(cpu, pc);
+    /* V47: parado no laço da espera do quadro: decodifica 1 grupo da música
+     * (1/18 de setor, ~45 us no PCSX2) e confere as IRQs de novo daqui a 4
+     * conferências (no laço, 256 levavam ~0,8 ms): a IRQ que acaba a
+     * espera atrasa no máximo esse grupo. */
+    if (!em_excecao && na_espera(cpu, pc) && ps2_som_ocioso())
+        g_ps2_contagem_irq = 4;
 }
 
 static void irq_poll_corpo(CPUState *cpu, uint32_t pc, int *entrar)
 {
+#ifdef PS2_TRACE_FMV
+    if (g_tr_ativo) ps2_tr_pc(em_excecao ? 1u : pc);
+#endif
     ps2_pad_tick();
     uint32_t agora = ps2_ps1_cycles();
     uint32_t sr = cpu->cop0[12];
@@ -342,6 +384,7 @@ static void irq_poll_corpo(CPUState *cpu, uint32_t pc, int *entrar)
         ps2_cdrom_update(agora);
         t1 = prof_agora();
         ps2_timers_poll();
+        ps2_dma_poll();                   /* V48: fim do DMA1 (MDEC -> RAM) */
         t2 = prof_agora();
         g_prof_cd += (uint32_t)(t1 - t0); g_prof_tmr += (uint32_t)(t2 - t1);
     }
@@ -351,12 +394,32 @@ static void irq_poll_corpo(CPUState *cpu, uint32_t pc, int *entrar)
     }
     if ((int32_t)(agora - proximo_vblank) >= 0) {
         uint32_t tv = prof_agora();
+        int pmc_r = pmc_trocar(PMC_RUNTIME);   /* trabalho do port no VBlank (e o relatório) */
         ps2_gpu_vblank();
         { extern void ps2_gpu_orcamento_vblank(void); ps2_gpu_orcamento_vblank(); }
         ps2_video_vblank();
+        ps2_som_vblank();                 /* V47: música XA */
+#if PS2_LOG_ETAPAS
+        /* V53: marcos do começo no log, gravados na hora */
+        if (g_vblanks == 1u || g_vblanks == 60u || g_vblanks == 300u || g_vblanks == 900u) {
+            extern int kit_log_gravar(void);
+            printf("etapa: vblank %lu\n", (unsigned long)g_vblanks);
+            kit_log_gravar();
+        }
+#endif
         g_prof_vblank += (uint32_t)(prof_agora() - tv);
+        pmc_trocar(pmc_r);
         ps2_irq_raise(IRQ_VBLANK);
         ps2_diag(1u, (uint32_t)g_vblanks);
+#ifdef PS2_TRACE_FMV
+        if (g_tr_ativo && (g_vblanks % 30u) == 0u) {
+            TR("vb %lu pc %08x ra %08x exc %d | cd int1 %lu bfrd %lu perdidos %lu | mdec st %lu rd %lu",
+               (unsigned long)g_vblanks, cpu->pc, cpu->gpr[31], em_excecao,
+               g_tr_int1, g_tr_bfrd, g_tr_perdidos, g_tr_mdec_st, g_tr_mdec_rd);
+            ps2_tr_pc_relatorio();
+            ps2_tr_anel("vb");
+        }
+#endif
         proximo_vblank += CICLOS_VBLANK;
         /* atrasou mais de um período (ex.: gravação do log): pula os VBlanks
          * perdidos SEM perder a fase (antes somava o atraso todo e o PS1
@@ -377,6 +440,63 @@ static void irq_poll_corpo(CPUState *cpu, uint32_t pc, int *entrar)
     *entrar = 1;
 }
 
+/* ---------------- memory card (V59, cartao_ps1.c) ---------------- */
+/* Eventos do cartão: SwCARD e HwCARD; IOE = pronto, TIMOUT = sem cartão. */
+#define EV_SWCARD 0xF4000001u
+#define EV_HWCARD 0xF0000011u
+#define MC_FD_BASE 2u               /* fds da BIOS: 0 e 1 são o terminal */
+
+static void cartao_evento(int ok)
+{
+    ev_entregar(EV_SWCARD, ok ? 0x0004u : 0x0100u);
+    ev_entregar(EV_HWCARD, ok ? 0x0004u : 0x0100u);
+}
+
+/* "bu00:NOME" (porta 1) -> NOME; NULL para outro dispositivo ou porta 2 */
+static const char *nome_bu(uint32_t a, char *nome, unsigned cap)
+{
+    unsigned i;
+    for (i = 0; i + 1u < cap; i++) {
+        nome[i] = (char)ps2_ram_get8(a + i);
+        if (!nome[i]) break;
+    }
+    nome[i] = 0;
+    if (strncmp(nome, "bu00:", 5) != 0) return NULL;
+    return nome + 5;
+}
+
+static int fd_bu(uint32_t fd) { return fd >= MC_FD_BASE && fd < MC_FD_BASE + MC_FDS && mc_modo((int)(fd - MC_FD_BASE)) >= 0; }
+
+static uint8_t mc_buf[MC_BLOCO];
+
+/* read/write de um arquivo do cartão: copia em pedaços pelo mc_buf */
+static uint32_t cartao_rw(uint32_t fd, uint32_t end, uint32_t n, int escrever)
+{
+    int f = (int)(fd - MC_FD_BASE), modo = mc_modo(f);
+    uint32_t feito = 0;
+    while (feito < n) {
+        uint32_t parte = n - feito, i;
+        int r;
+        if (parte > MC_BLOCO) parte = MC_BLOCO;
+        if (escrever) {
+            for (i = 0; i < parte; i++) mc_buf[i] = ps2_ram_get8(end + feito + i);
+            r = mc_escrever(f, mc_buf, parte);
+        } else {
+            r = mc_ler(f, mc_buf, parte);
+            for (i = 0; r > 0 && i < (uint32_t)r; i++) ps2_ram_set8(end + feito + i, mc_buf[i]);
+        }
+        if (r < 0) { feito = 0xFFFFFFFFu; break; }     /* erro (mesmo depois de uma parte) */
+        if (r == 0) break;                              /* fim do arquivo */
+        feito += (uint32_t)r;
+        if ((uint32_t)r < parte) break;
+    }
+    if (modo & MC_FASYNC) cartao_evento(feito != 0xFFFFFFFFu);
+    return feito;
+}
+
+static unsigned n_log_cartao;
+#define LOG_CARTAO(...) do { if (n_log_cartao < 60u) { n_log_cartao++; printf(__VA_ARGS__); } } while (0)
+
 /* ---------------- chamadas da BIOS ---------------- */
 
 
@@ -390,6 +510,7 @@ int ps2_bios_call(CPUState *cpu, uint32_t endereco)
 
     if (endereco == RET_MAGICO && em_excecao) {     /* voltou de um handler */
         ps2_diag(8u, 0);
+        ps2_timer_pad_adianta(0);
         continuar_excecao(cpu);
         return 1;
     }
@@ -430,9 +551,11 @@ int ps2_bios_call(CPUState *cpu, uint32_t endereco)
         }
         v0 = 0;
     }
-    if (tab == 0 && (num == 0xABu || num == 0xACu)) {   /* _card_info/_card_load: sem cartão */
-        ev_entregar(0xF4000001u, 0x0100u);
-        ev_entregar(0xF0000011u, 0x0100u);
+    if (tab == 0 && (num == 0xABu || num == 0xACu)) {   /* _card_info/_card_load */
+        int ok = a0 == 0u && g_mc_presente;             /* só a porta 1 tem cartão */
+        LOG_CARTAO("cartao: %s(%02lx) -> %s\n", num == 0xABu ? "_card_info" : "_card_load",
+                   (unsigned long)a0, ok ? "pronto" : "sem cartao");
+        cartao_evento(ok);
         v0 = 1;
     }
     if (tab == 1) {
@@ -485,24 +608,63 @@ int ps2_bios_call(CPUState *cpu, uint32_t endereco)
                      break; }
         case 0x18: custom_exit = 0; break;          /* SetDefaultExitFromException */
         case 0x19: custom_exit = a0; break;         /* SetCustomExitFromException */
-        case 0x32: {                                /* open(nome, modo): sem memory card */
-            char nome[40]; unsigned i;
-            for (i = 0; i < sizeof(nome) - 1u; i++) {
-                nome[i] = (char)ps2_ram_get8(a0 + i);
-                if (!nome[i]) break;
-            }
-            nome[i] = 0;
-            printf("bios: open(\"%s\") -> nao encontrado\n", nome);
-            v0 = 0xFFFFFFFFu;
+        case 0x32: {                                /* open(nome, modo) */
+            char nome[40];
+            const char *n = nome_bu(a0, nome, sizeof(nome));
+            int fd = n ? mc_abrir(n, a1) : -1;
+            v0 = fd >= 0 ? (uint32_t)fd + MC_FD_BASE : 0xFFFFFFFFu;
+            LOG_CARTAO("cartao: open(\"%s\", %lx) -> %ld\n", nome, (unsigned long)a1, (long)(int32_t)v0);
             break; }
-        case 0x34: v0 = 0xFFFFFFFFu; break;         /* read: erro */
-        case 0x4E: case 0x4F:                       /* write/read_card_sector */
-            /* sem memory card: a operação "começa" e termina em timeout */
-            ev_entregar(0xF4000001u, 0x0100u);      /* SwCARD, EvSpTIMOUT */
-            ev_entregar(0xF0000011u, 0x0100u);      /* HwCARD, EvSpTIMOUT */
-            v0 = 1;
+        case 0x33:                                  /* lseek(fd, pos, de) */
+            v0 = fd_bu(a0) ? (uint32_t)mc_posicionar((int)(a0 - MC_FD_BASE), (int32_t)a1, (int)a2) : 0xFFFFFFFFu;
             break;
+        case 0x34:                                  /* read(fd, dst, n) */
+            v0 = fd_bu(a0) ? cartao_rw(a0, a1, a2, 0) : 0xFFFFFFFFu;
+            LOG_CARTAO("cartao: read(%lu, %lu) -> %ld\n", (unsigned long)a0, (unsigned long)a2, (long)(int32_t)v0);
+            break;
+        case 0x36: {                                /* close(fd) */
+            int r = fd_bu(a0) ? mc_fechar((int)(a0 - MC_FD_BASE)) : -1;
+            v0 = r >= 0 ? (uint32_t)r + MC_FD_BASE : 0xFFFFFFFFu;
+            break; }
+        case 0x41:                                  /* format("bu00:") */
+            { char nome[40]; v0 = 0;
+              if (nome_bu(a0, nome, sizeof(nome)) && g_mc_presente) { mc_formatar_cartao(); v0 = 1; }
+              LOG_CARTAO("cartao: format(\"%s\") -> %lu\n", nome, (unsigned long)v0); }
+            break;
+        case 0x42: case 0x43: {                     /* firstfile(padrao, ent) / nextfile(ent) */
+            uint8_t ent[0x28]; char nome[40]; unsigned i; int achou = 0;
+            uint32_t dest = num == 0x42u ? a1 : a0;
+            if (num == 0x42u) { const char *n = nome_bu(a0, nome, sizeof(nome)); achou = n && mc_primeiro(n, ent); }
+            else achou = mc_proximo(ent);
+            if (achou) for (i = 0; i < sizeof(ent); i++) ps2_ram_set8(dest + i, ent[i]);
+            v0 = achou ? dest : 0;
+            LOG_CARTAO("cartao: %s -> %.20s\n", num == 0x42u ? "firstfile" : "nextfile", achou ? (char *)ent : "(nada)");
+            break; }
+        case 0x45: {                                /* erase(nome) */
+            char nome[40]; const char *n = nome_bu(a0, nome, sizeof(nome));
+            v0 = n ? (uint32_t)mc_apagar(n) : 0;
+            LOG_CARTAO("cartao: erase(\"%s\") -> %lu\n", nome, (unsigned long)v0);
+            break; }
+        case 0x4E: case 0x4F: {                     /* write/read_card_sector(porta, quadro, buf) */
+            uint8_t q[MC_QUADRO]; unsigned i; int ok = a0 == 0u && g_mc_presente;
+            if (ok && num == 0x4Eu) {
+                for (i = 0; i < MC_QUADRO; i++) q[i] = ps2_ram_get8(a2 + i);
+                ok = mc_quadro_escrever(a1, q);
+            } else if (ok) {
+                ok = mc_quadro_ler(a1, q);
+                for (i = 0; ok && i < MC_QUADRO; i++) ps2_ram_set8(a2 + i, q[i]);
+            }
+            LOG_CARTAO("cartao: %s(%02lx, %lu) -> %s\n", num == 0x4Eu ? "write_card_sector" : "read_card_sector",
+                       (unsigned long)a0, (unsigned long)a1, ok ? "ok" : "sem cartao");
+            cartao_evento(ok);
+            v0 = 1;
+            break; }
         case 0x35:                                  /* write(fd, buf, len) */
+            if (fd_bu(a0)) {
+                v0 = cartao_rw(a0, a1, a2, 1);
+                LOG_CARTAO("cartao: write(%lu, %lu) -> %ld\n", (unsigned long)a0, (unsigned long)a2, (long)(int32_t)v0);
+                break;
+            }
             if (a0 == 1u) {
                 uint32_t i;
                 for (i = 0; i < a2 && i < 512u; i++)

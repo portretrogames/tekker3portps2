@@ -2,6 +2,8 @@
 #include "cdrom.h"
 #include "io.h"
 #include "ram.h"
+#include "som.h"     /* V47: música XA */
+#include "trace_fmv.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -9,10 +11,10 @@
 /* ---------------- disco ---------------- */
 
 #define SETOR      2352u
-#define T1_SETORES 268934u      /* faixa 1 (dados), tamanho do .bin / 2352 */
-#define T2_INICIO  (T1_SETORES + 150u)            /* INDEX 01 da faixa 2 */
-#define T3_INICIO  (T1_SETORES + 11778u + 150u)   /* INDEX 01 da faixa 3 */
-#define LEADOUT    (T1_SETORES + 11778u + 11923u)
+#define T1_SETORES PS2_CD_T1_SETORES                     /* faixa 1 (dados) */
+#define T2_INICIO  (T1_SETORES + 150u)                     /* INDEX 01 da faixa 2 */
+#define T3_INICIO  (T1_SETORES + PS2_CD_T2_SETORES + 150u) /* INDEX 01 da faixa 3 */
+#define LEADOUT    (T1_SETORES + PS2_CD_T2_SETORES + PS2_CD_T3_SETORES)
 
 static FILE *disco;
 
@@ -180,11 +182,16 @@ int ps2_cdrom_abrir(const char *pasta)
         disco = fopen(caminho, "rb");
         if (disco) printf("cdrom: disco aberto: %s\n", caminho);
     }
-    if (!arq_aberto()) {
-        disco = fopen("mass:/TEKKEN3/TEKKEN3.BIN", "rb");
-        if (disco) printf("cdrom: disco aberto: mass:/TEKKEN3/TEKKEN3.BIN\n");
+    {
+        const char *achou = arq_aberto() ? pasta : NULL;   /* pasta que abriu o disco */
+        if (!arq_aberto()) {
+            disco = fopen("mass:/TEKKEN3/TEKKEN3.BIN", "rb");
+            if (disco) { printf("cdrom: disco aberto: mass:/TEKKEN3/TEKKEN3.BIN\n"); achou = "mass:/TEKKEN3/"; }
+        }
+        if (!arq_aberto()) printf("cdrom: AVISO: imagem do disco nao encontrada\n");
+        /* V59: a faixa de áudio abre agora, com o fileXio sem pedido em andamento */
+        else ps2_som_cdda_abrir(achou);
     }
-    if (!arq_aberto()) printf("cdrom: AVISO: imagem do disco nao encontrada\n");
     cache_invalidar();
     return arq_aberto();
 }
@@ -268,7 +275,9 @@ static void lba_para_msf(uint32_t lba, uint8_t *m, uint8_t *s, uint8_t *f)
 #define INT1 1u   /* dados prontos */
 #define INT2 2u   /* comando concluído (2ª resposta) */
 #define INT3 3u   /* 1ª resposta */
+#define INT4 4u   /* DataEnd (fim da faixa de áudio) */
 #define INT5 5u   /* erro */
+#define MODO_AUTOPAUSE 0x02u
 
 #define CICLOS_1A_RESP   50000u
 #define CICLOS_SETOR_1X  451584u   /* 33.868.800 / 75 */
@@ -299,6 +308,7 @@ static int      setor_pedido;               /* jogo já pediu os dados (BFRD)? *
 static int      bfrd_pendente;
 static void preparar_fifo(void);
 static uint32_t setor_quando;               /* quando o último setor foi lido */
+static uint32_t ultima_leitura;             /* V48: última leitura física (dado ou XA) */
 static uint8_t  fifo[SETOR];
 static uint32_t fifo_n, fifo_pos;
 static uint32_t agora;                      /* ciclos PS1 (última atualização) */
@@ -317,6 +327,7 @@ void ps2_cdrom_reset(void)
     alvo_lba = atual_lba = 0;
     setloc_pendente = lendo = ocupado = 0;
     fifo_n = fifo_pos = 0; setor_ok = 0; setor_pedido = 0; bfrd_pendente = 0;
+    ultima_leitura = agora - CICLOS_SETOR_1X;   /* a 1ª leitura não espera */
 }
 
 static void agendar(uint32_t atraso, uint8_t tipo, const uint8_t *r, uint8_t n)
@@ -333,6 +344,15 @@ static void agendar(uint32_t atraso, uint8_t tipo, const uint8_t *r, uint8_t n)
 static void agendar_stat(uint32_t atraso, uint8_t tipo)
 {
     agendar(atraso, tipo, &stat, 1);
+}
+
+/* V59: ver cdrom.h. Como o controlador do PS1: o motor para de tocar e, no
+ * fim normal com Autopause, vem DataEnd. */
+void ps2_cdrom_cdda_fim(int normal)
+{
+    if (stat & STAT_PLAY) atual_lba = ps2_som_cdda_lba();
+    stat &= (uint8_t)~STAT_PLAY;
+    if (normal && (modo & MODO_AUTOPAUSE)) agendar_stat(CICLOS_1A_RESP, INT4);
 }
 
 static void remover_int1(void)
@@ -384,13 +404,21 @@ static void comando(uint8_t cmd)
         setloc_pendente = 1;
         agendar_stat(CICLOS_1A_RESP, INT3);
         break;
-    case 0x03:                                    /* Play (CDDA): ainda mudo */
+    case 0x03:                                    /* Play (CDDA): som.c toca a faixa (V59) */
         if (setloc_pendente) { atual_lba = alvo_lba; setloc_pendente = 0; }
+        if (n_param >= 1u && param[0]) {          /* Play com a faixa (BCD): começo dela */
+            uint8_t f = bcd2bin(param[0]);
+            atual_lba = f == 2u ? T2_INICIO : f == 3u ? T3_INICIO : 0u;
+        }
         lendo = 0; remover_int1();
         stat = (uint8_t)((stat | STAT_PLAY) & ~STAT_READ);
         agendar_stat(CICLOS_1A_RESP, INT3);
+        /* depois da resposta: se não há o que tocar, som.c avisa o fim já
+         * (ps2_cdrom_cdda_fim tira o STAT_PLAY; o INT4 vem depois do INT3) */
+        ps2_som_cd_cmd(cmd, param, atual_lba);
         break;
     case 0x06: case 0x1B:                         /* ReadN / ReadS */
+        ps2_som_cd_cmd(cmd, param, 0);            /* V59: para o CD-DA */
         agendar_stat(CICLOS_1A_RESP, INT3);
         comecar_leitura();
         break;
@@ -400,12 +428,16 @@ static void comando(uint8_t cmd)
         agendar_stat(CICLOS_1A_RESP * 4u, INT2);
         break;
     case 0x08:                                    /* Stop */
+        if (stat & STAT_PLAY) atual_lba = ps2_som_cdda_lba();   /* V59: onde parou */
+        ps2_som_cd_cmd(cmd, param, 0);            /* V59: para o CD-DA */
         lendo = 0; remover_int1();
         agendar_stat(CICLOS_1A_RESP, INT3);
         stat = 0;
         agendar_stat(CICLOS_1A_RESP * 4u, INT2);
         break;
     case 0x09:                                    /* Pause */
+        if (stat & STAT_PLAY) atual_lba = ps2_som_cdda_lba();   /* V59: Play retoma daqui */
+        ps2_som_cd_cmd(cmd, param, 0);            /* V59: para o CD-DA */
         agendar_stat(CICLOS_1A_RESP, INT3);
         lendo = 0; remover_int1();
         stat &= (uint8_t)~(STAT_READ | STAT_PLAY | STAT_SEEK);
@@ -414,16 +446,19 @@ static void comando(uint8_t cmd)
     case 0x0A: case 0x1C:                         /* Init / Reset */
         lendo = 0; remover_int1();
         modo = 0;
+        ps2_som_cd_cmd(cmd, param, 0);
         stat = STAT_MOTOR;
         agendar_stat(CICLOS_1A_RESP, INT3);
         if (cmd == 0x0A) agendar_stat(CICLOS_1A_RESP * 8u, INT2);
         break;
     case 0x0B: case 0x0C: case 0x0D: case 0x12:   /* Mute/Demute/Setfilter/SetSession */
+        if (cmd != 0x12) ps2_som_cd_cmd(cmd, param, 0);   /* V47: mudo e filtro do XA */
         agendar_stat(CICLOS_1A_RESP, INT3);
         if (cmd == 0x12) agendar_stat(CICLOS_1A_RESP * 4u, INT2);
         break;
     case 0x0E:                                    /* Setmode */
         modo = param[0];
+        ps2_som_cd_cmd(cmd, param, 0);
         agendar_stat(CICLOS_1A_RESP, INT3);
         break;
     case 0x0F:                                    /* Getparam */
@@ -434,11 +469,15 @@ static void comando(uint8_t cmd)
         agendar(CICLOS_1A_RESP, INT3, setor + 12, 8);
         break;
     case 0x11: {                                  /* GetlocP */
-        uint32_t trilha = 1, ini = 0, rel;
-        if (atual_lba >= T3_INICIO) { trilha = 3; ini = T3_INICIO; }
-        else if (atual_lba >= T2_INICIO) { trilha = 2; ini = T2_INICIO; }
-        rel = atual_lba - ini;
-        r[0] = bin2bcd(trilha); r[1] = 1;
+        uint32_t trilha = 1, ini = 0, rel, indice = 1;
+        if (stat & STAT_PLAY) atual_lba = ps2_som_cdda_lba();   /* V59: onde o CD-DA está */
+        /* faixa pelo INDEX 00 (o pregap de 2 s é da faixa seguinte); no
+         * pregap, índice 0 e o tempo contando até o INDEX 01 */
+        if (atual_lba >= T3_INICIO - 150u) { trilha = 3; ini = T3_INICIO; }
+        else if (atual_lba >= T2_INICIO - 150u) { trilha = 2; ini = T2_INICIO; }
+        if (atual_lba < ini) { indice = 0; rel = ini - atual_lba; }
+        else rel = atual_lba - ini;
+        r[0] = bin2bcd(trilha); r[1] = (uint8_t)indice;
         r[2] = bin2bcd(rel / 4500u); r[3] = bin2bcd((rel / 75u) % 60u);
         r[4] = bin2bcd(rel % 75u);
         lba_para_msf(atual_lba, &r[5], &r[6], &r[7]);
@@ -457,6 +496,7 @@ static void comando(uint8_t cmd)
         agendar(CICLOS_1A_RESP, INT3, r, 3);
         break; }
     case 0x15: case 0x16:                         /* SeekL / SeekP */
+        ps2_som_cd_cmd(cmd, param, 0);            /* V59: para o CD-DA */
         if (setloc_pendente) { atual_lba = alvo_lba; setloc_pendente = 0; }
         lendo = 0; remover_int1();
         stat = (uint8_t)((stat | STAT_SEEK) & ~(STAT_READ | STAT_PLAY));
@@ -508,12 +548,24 @@ void ps2_cdrom_update(uint32_t ciclos)
          * mais lento que um PS1), mas não para sempre: se o jogo ignorar um
          * setor (o hardware real simplesmente segue), após 8 períodos o
          * drive entrega o próximo. */
+        /* V48: na recuperação de atraso, no máximo 2x a cadência entre duas
+         * leituras quaisquer (um setor XA não muda setor_quando, e sem isto
+         * o setor seguinte saía na mesma conferência) */
         if (!tem_int1 && iflag == 0 &&
+            (uint32_t)(agora - ultima_leitura) >= periodo_setor() / 2u &&
             (!setor_ok ||
              (setor_pedido && (uint32_t)(agora - setor_quando) >= periodo_setor() / 2u) ||
              (!setor_pedido && (uint32_t)(agora - setor_quando) >= 8u * periodo_setor()))) {
             prox_setor += periodo_setor();
-            if ((int32_t)(agora - prox_setor) >= 0) prox_setor = agora + periodo_setor();
+            /* V48: se o jogo demorou a atender (o drive esperou), recupera o
+             * atraso: o próximo setor sai assim que o jogo pedir este (no
+             * máximo 2x mais rápido, pela regra do meio período acima). Antes
+             * o horário recomeçava do "agora" e cada demora era perdida de
+             * vez: no vídeo da abertura o CD (vídeo e música juntos) andava
+             * a ~92% do PS1 nos trechos pesados e o som falhava. Mais de 8
+             * setores de atraso (pausa longa): recomeça do agora. */
+            if ((int32_t)(agora - prox_setor) >= (int32_t)(8u * periodo_setor()))
+                prox_setor = agora + periodo_setor();
             {
                 static uint8_t novo[SETOR];
                 if (!ler_setor(atual_lba, novo) && atual_lba < T1_SETORES) {
@@ -525,15 +577,28 @@ void ps2_cdrom_update(uint32_t ciclos)
                     return;
                 }
                 atual_lba++;
+                ultima_leitura = agora;
                 /* setor de áudio XA (submode bit2) com XA ligado: vai para o
                  * SPU (ainda mudo). NÃO substitui o setor de dados pendente:
                  * no console o jogo é mais lento e pede os dados depois que o
                  * próximo setor (XA da música) já passou; antes o XA apagava
                  * o dado e o libcd esperava para sempre (luta travada). */
+                if (novo[18] & 0x04u) ps2_som_xa(novo, (modo & 0x40u) != 0);   /* V47 */
                 if ((modo & 0x40u) && (novo[18] & 0x04u)) {
                     if (!setor_ok) setor_quando = agora;
                 } else {
                     uint8_t st = stat;
+                    if (setor_ok && !setor_pedido) TR_CONTA(g_tr_perdidos);
+#ifdef PS2_TRACE_FMV
+                    if (g_tr_ativo && (modo & 0x40u)) {
+                        const uint8_t *h = novo + 24;
+                        TR("setor %lu %s | str %u/%u quadro %u", (unsigned long)(atual_lba - 1u),
+                           setor_ok && !setor_pedido ? "PERDIDO" : "", h[4] | h[5] << 8, h[6] | h[7] << 8,
+                           (unsigned)(h[8] | h[9] << 8));
+                        ps2_tr_anel("antes");
+                    }
+#endif
+                    TR_CONTA(g_tr_int1);
                     memcpy(setor, novo, SETOR);
                     setor_lba = atual_lba - 1u;
                     setor_pedido = 0;
@@ -594,6 +659,7 @@ uint8_t ps2_cdrom_read(uint32_t reg)
 
 static void preparar_fifo(void)
 {
+    TR_CONTA(g_tr_bfrd);
     if (!setor_pedido) setor_quando = agora;   /* conta a partir do pedido */
     setor_pedido = 1;
     if (!setor_ok) { fifo_n = fifo_pos = 0; bfrd_pendente = 1; return; }

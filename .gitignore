@@ -17,6 +17,10 @@ ps2/vram_dump.bin
 # log do port (PCSX2/PS2 real)
 ps2/tekken3_log.txt
 *tekken3_log.txt
+tekken3_log_*.txt
+# log da última execução pela rede (tools/rodar_ps2_rede.sh) e rastreio da SPU
+ps2/docs/ultimo_log_ps2_rede.txt
+spu_trace.bin
 
 # pacotes para avaliação externa
 entrega/
@@ -25,3 +29,6 @@ entrega/
 codigo_limpo.txt
 codigo_ps2_puro.txt
 __pycache__/
+
+# Revisões do Antigravity e do Codex (~/PROJETOS/revisar.sh)
+revisoes/

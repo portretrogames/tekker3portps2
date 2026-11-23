@@ -73,15 +73,49 @@ static inline int64_t prod3(int32_t a1, int32_t b1, int32_t a2, int32_t b2, int3
             : "=r"(r) : "r"(a1), "r"(b1), "r"(a2), "r"(b2), "r"(a3), "r"(b3) : "hi", "lo");
     return r;
 }
+/* V60: dois prod3 ao mesmo tempo. O EE tem dois multiplicadores: o 0 (MULT/MADD,
+ * HI/LO) e o 1 (MULT1/MADD1, HI1/LO1); um não espera o outro. PMFHL.LW junta
+ * HI:LO dos dois num registrador de 128 bits (64 de baixo = multiplicador 0,
+ * 64 de cima = 1); PCPYUD traz a metade de cima. O GCC não conhece HI1/LO1 (não
+ * há clobber para eles): o Makefile (build/mult1_ok) para o build se o
+ * multiplicador 1 aparecer no ELF fora de gte.o. As saídas não são early-clobber:
+ * PMFHL/PCPYUD vêm depois da última leitura das entradas. */
+static inline __attribute__((always_inline)) void prod3_par(
+    int32_t a1, int32_t b1, int32_t a2, int32_t b2, int32_t a3, int32_t b3,
+    int32_t c1, int32_t d1, int32_t c2, int32_t d2, int32_t c3, int32_t d3, int64_t *r0, int64_t *r1)
+{
+    int64_t p, q;
+    __asm__("mult %2, %3\n\tmult1 %8, %9\n\tmadd %4, %5\n\tmadd1 %10, %11\n\t"
+            "madd %6, %7\n\tmadd1 %12, %13\n\tpmfhl.lw %0\n\tpcpyud %1, %0, %0"
+            : "=r"(p), "=r"(q)
+            : "r"(a1), "r"(b1), "r"(a2), "r"(b2), "r"(a3), "r"(b3),
+              "r"(c1), "r"(d1), "r"(c2), "r"(d2), "r"(c3), "r"(d3) : "hi", "lo");
+    *r0 = p; *r1 = q;
+}
+static inline __attribute__((always_inline)) void mul32_par(int32_t a, int32_t b, int32_t c, int32_t d,
+                                                            int64_t *r0, int64_t *r1)
+{
+    int64_t p, q;
+    __asm__("mult %2, %3\n\tmult1 %4, %5\n\tpmfhl.lw %0\n\tpcpyud %1, %0, %0"
+            : "=r"(p), "=r"(q) : "r"(a), "r"(b), "r"(c), "r"(d) : "hi", "lo");
+    *r0 = p; *r1 = q;
+}
 #else
 static inline int64_t mul32(int32_t a, int32_t b) { return (int64_t)a * (int64_t)b; }
 static inline int64_t prod3(int32_t a1, int32_t b1, int32_t a2, int32_t b2, int32_t a3, int32_t b3)
 { return (int64_t)a1 * b1 + (int64_t)a2 * b2 + (int64_t)a3 * b3; }
+static inline void prod3_par(int32_t a1, int32_t b1, int32_t a2, int32_t b2, int32_t a3, int32_t b3,
+                             int32_t c1, int32_t d1, int32_t c2, int32_t d2, int32_t c3, int32_t d3,
+                             int64_t *r0, int64_t *r1)
+{ *r0 = prod3(a1, b1, a2, b2, a3, b3); *r1 = prod3(c1, d1, c2, d2, c3, d3); }
+static inline void mul32_par(int32_t a, int32_t b, int32_t c, int32_t d, int64_t *r0, int64_t *r1)
+{ *r0 = mul32(a, b); *r1 = mul32(c, d); }
 #endif
 /* V29: caminho rápido. Fatores de 16 bits dão produtos < 2^30; com o vetor
  * de translação |t| < 2^30, t*4096 + 3 produtos < 2^43: nenhuma soma parcial
  * estoura os 44 bits do MAC, então as checagens A() não mudam nada e saem. */
 int g_gte_rapido = 1;
+long g_gte_autoteste_dif = -1;   /* V60: -1 = autoteste do boot não rodou */
 static inline __attribute__((always_inline)) int t_pequeno(uint32_t a, uint32_t b, uint32_t c)
 {
     return ((a + 0x40000000u) | (b + 0x40000000u) | (c + 0x40000000u)) < 0x80000000u;
@@ -226,18 +260,13 @@ static inline __attribute__((always_inline)) int64_t rtp(CPUState *cpu, int v, i
     int64_t x, y, z;
     int64_t n, m0;
     int32_t z12;
-    if (__builtin_expect(g_gte_rapido && t_pequeno(C(5), C(6), C(7)), 1)) {
-        x = ((int64_t)(int32_t)C(5) << 12) + prod3(M(cpu, 0, 0, 0), vx, M(cpu, 0, 0, 1), vy, M(cpu, 0, 0, 2), vz);
-        y = ((int64_t)(int32_t)C(6) << 12) + prod3(M(cpu, 0, 1, 0), vx, M(cpu, 0, 1, 1), vy, M(cpu, 0, 1, 2), vz);
-        z = ((int64_t)(int32_t)C(7) << 12) + prod3(M(cpu, 0, 2, 0), vx, M(cpu, 0, 2, 1), vy, M(cpu, 0, 2, 2), vz);
-    } else {
+    /* V45: só o caminho completo; o rápido (TR pequeno) é rtp_rapido() */
     x = A(1, A(1, A(1, ((int64_t)(int32_t)C(5) * 4096) + mul32(M(cpu, 0, 0, 0), vx))
                     + mul32(M(cpu, 0, 0, 1), vy)) + mul32(M(cpu, 0, 0, 2), vz));
     y = A(2, A(2, A(2, ((int64_t)(int32_t)C(6) * 4096) + mul32(M(cpu, 0, 1, 0), vx))
                     + mul32(M(cpu, 0, 1, 1), vy)) + mul32(M(cpu, 0, 1, 2), vz));
     z = A(3, A(3, A(3, ((int64_t)(int32_t)C(7) * 4096) + mul32(M(cpu, 0, 2, 0), vx))
                     + mul32(M(cpu, 0, 2, 1), vy)) + mul32(M(cpu, 0, 2, 2), vz));
-    }
 
     D(25) = (uint32_t)(int32_t)(x >> sh);
     D(26) = (uint32_t)(int32_t)(y >> sh);
@@ -267,6 +296,128 @@ static inline __attribute__((always_inline)) int64_t rtp(CPUState *cpu, int v, i
     return n;
 }
 
+/* V45: RTPS/RTPT fora do caminho rápido (TR grande ou g_gte_rapido = 0): raro,
+ * então fica fora de linha para não inchar cada gte_k_* (cache de instruções). */
+static __attribute__((noinline, cold)) void rtp_lento(CPUState *cpu, int tres, int sh, int lm)
+{
+    if (tres) { rtp(cpu, 0, sh, lm, 0); rtp(cpu, 1, sh, lm, 0); rtp(cpu, 2, sh, lm, 1); }
+    else rtp(cpu, 0, sh, lm, 1);
+}
+
+/* ---- V45: RTPS/RTPT rápidos ----
+ * Mesmo resultado do rtp() no caminho rápido (TR pequeno: os MAC não estouram
+ * os 44 bits), mas: a matriz, o TR e as constantes são lidos uma vez; FLAG fica
+ * num registro; MAC/IR dos vértices 0 e 1 (que o 3º sobrescreve) e as filas
+ * SZ/SXY são gravados só no fim; os zeros à esquerda da divisão saem numa
+ * instrução (PLZCW no EE). Conferido no boot contra o caminho completo
+ * (gte_bench) e no PC por tests/gte_test.c. */
+static inline __attribute__((always_inline)) uint32_t clz16_nz(uint32_t v)   /* v em 1..0xFFFF */
+{
+#ifdef _EE
+    uint64_t r;
+    /* PLZCW: bits iguais ao bit de sinal no início de cada palavra, menos 1.
+     * Palavra positiva: zeros à esquerda (de 32) - 1 = (16 + z16) - 1. */
+    __asm__("plzcw %0, %1" : "=r"(r) : "r"((uint64_t)v));
+    return (uint32_t)r - 15u;
+#else
+    return (uint32_t)__builtin_clz(v) - 16u;
+#endif
+}
+
+static inline __attribute__((always_inline)) uint32_t dividir_r(uint32_t h, uint32_t sz3, uint32_t *fl)
+{   /* = dividir(), mas com FLAG local e PLZCW. A duplicação é de propósito: o
+     * caminho completo (dividir) fica como referência independente, e o
+     * autoteste do boot compara os dois (confere o PLZCW no console).
+     * A tabela unr já tem que estar pronta (rtp_rapido garante). */
+    uint32_t z, n, d, u;
+    if (h >= sz3 * 2u) { *fl |= 1u << 17; return 0x1FFFFu; }
+    z = clz16_nz(sz3 & 0xFFFFu);
+    n = h << z;
+    d = sz3 << z;
+    u = (uint32_t)unr[(d - 0x7FC0u) >> 7] + 0x101u;
+    d = (0x2000080u - (d * u)) >> 8;
+    d = (0x0000080u + (d * u)) >> 8;
+    n = (uint32_t)(((uint64_t)n * d + 0x8000u) >> 16);
+    return n > 0x1FFFFu ? 0x1FFFFu : n;
+}
+
+static inline __attribute__((always_inline)) void f_r(int64_t v, uint32_t *fl)   /* = F() */
+{
+    if (__builtin_expect((uint64_t)v + 0x80000000ULL >= 0x100000000ULL, 0))
+        *fl |= v > 0x7FFFFFFFLL ? 1u << 16 : 1u << 15;
+}
+
+static inline __attribute__((always_inline)) void rtp_rapido(CPUState *cpu, const int nv, int sh, int lm)
+{   /* nv = 1 (RTPS, vértice 0) ou 3 (RTPT); só com t_pequeno(TR) e g_gte_rapido */
+    const int32_t r11 = lo16(C(0)), r12 = hi16(C(0)), r13 = lo16(C(1));
+    const int32_t r21 = hi16(C(1)), r22 = lo16(C(2)), r23 = hi16(C(2));
+    const int32_t r31 = lo16(C(3)), r32 = hi16(C(3)), r33 = lo16(C(4));
+    const int64_t tx = (int64_t)(int32_t)C(5) * 4096, ty = (int64_t)(int32_t)C(6) * 4096,
+                  tz = (int64_t)(int32_t)C(7) * 4096;
+    const int32_t ofx = (int32_t)C(24), ofy = (int32_t)C(25);
+    const uint32_t h = C(26) & 0xFFFFu;
+    const int32_t irmin = lm ? 0 : -0x8000;
+    uint32_t fl = 0, n = 0, zf[3], sxyf[3];
+    int32_t mac1 = 0, mac2 = 0, mac3 = 0, ir1 = 0, ir2 = 0, ir3 = 0;
+    int v;
+    if (__builtin_expect(!unr_pronta, 0)) unr_iniciar();
+    #pragma GCC unroll 3
+    for (v = 0; v < nv; v++) {
+        const int32_t vx = lo16(D(v * 2)), vy = hi16(D(v * 2)), vz = lo16(D(v * 2 + 1));
+        int64_t px, py;
+        prod3_par(r11, vx, r12, vy, r13, vz, r21, vx, r22, vy, r23, vz, &px, &py);   /* V60 */
+        const int64_t x = tx + px, y = ty + py;
+        const int64_t z = tz + prod3(r31, vx, r32, vy, r33, vz);
+        int32_t z12 = (int32_t)(z >> 12), sz, sx, sy;
+        int64_t m0;
+        mac1 = (int32_t)(x >> sh); mac2 = (int32_t)(y >> sh); mac3 = (int32_t)(z >> sh);
+        ir1 = mac1;
+        if (ir1 < irmin)       { fl |= 1u << 24; ir1 = irmin; }
+        else if (ir1 > 0x7FFF) { fl |= 1u << 24; ir1 = 0x7FFF; }
+        ir2 = mac2;
+        if (ir2 < irmin)       { fl |= 1u << 23; ir2 = irmin; }
+        else if (ir2 > 0x7FFF) { fl |= 1u << 23; ir2 = 0x7FFF; }
+        ir3 = mac3 < irmin ? irmin : mac3 > 0x7FFF ? 0x7FFF : mac3;   /* quirk: flag pelo z >> 12 */
+        if (z12 < -0x8000 || z12 > 0x7FFF) fl |= 1u << 22;
+        sz = z12;                                                     /* push_sz */
+        if (sz < 0)           { fl |= 1u << 18; sz = 0; }
+        else if (sz > 0xFFFF) { fl |= 1u << 18; sz = 0xFFFF; }
+        zf[v] = (uint32_t)sz;
+        n = dividir_r(h, (uint32_t)sz, &fl);
+        {
+            int64_t m1;
+            mul32_par((int32_t)n, ir1, (int32_t)n, ir2, &m0, &m1);              /* V60 */
+            m0 += ofx; f_r(m0, &fl); sx = (int32_t)(m0 >> 16);
+            m1 += ofy; f_r(m1, &fl); sy = (int32_t)(m1 >> 16);
+        }
+        if (sx < -0x400)     { fl |= 1u << 14; sx = -0x400; }       /* push_sxy */
+        else if (sx > 0x3FF) { fl |= 1u << 14; sx = 0x3FF; }
+        if (sy < -0x400)     { fl |= 1u << 13; sy = -0x400; }
+        else if (sy > 0x3FF) { fl |= 1u << 13; sy = 0x3FF; }
+        sxyf[v] = ((uint32_t)sy << 16) | ((uint32_t)sx & 0xFFFFu);
+    }
+    {   /* último vértice: profundidade (MAC0, IR0) */
+        int64_t m0 = mul32((int32_t)n, lo16(C(27))) + (int32_t)C(28);
+        int32_t i0;
+        f_r(m0, &fl);
+        D(24) = (uint32_t)(int32_t)m0;
+        i0 = (int32_t)(m0 >> 12);
+        if (i0 < 0)           { fl |= 1u << 12; i0 = 0; }
+        else if (i0 > 0x1000) { fl |= 1u << 12; i0 = 0x1000; }
+        D(8) = (uint32_t)i0;
+    }
+    D(25) = (uint32_t)mac1; D(26) = (uint32_t)mac2; D(27) = (uint32_t)mac3;
+    D(9) = (uint32_t)ir1; D(10) = (uint32_t)ir2; D(11) = (uint32_t)ir3;
+    if (nv == 3) {
+        D(16) = D(19); D(17) = zf[0]; D(18) = zf[1]; D(19) = zf[2];
+        D(12) = sxyf[0]; D(13) = sxyf[1]; D(14) = D(15) = sxyf[2];
+    } else {
+        D(16) = D(17); D(17) = D(18); D(18) = D(19); D(19) = zf[0];
+        D(12) = D(13); D(13) = D(14); D(14) = D(15) = sxyf[0];
+    }
+    FLAG |= fl;
+}
+
 /* ---- iluminação e cor ---- */
 
 /* MAC = (matriz * vetor [+ (cv * 4096)]) >> sh; IR saturado */
@@ -278,7 +429,7 @@ static inline __attribute__((always_inline)) void mat_vec(CPUState *cpu, unsigne
     if (__builtin_expect(g_gte_rapido && t_pequeno((uint32_t)t1, (uint32_t)t2, (uint32_t)t3), 1)) {
         #pragma GCC unroll 3
         for (l = 0; l < 3; l++)
-            r[l] = (t[l] << 12) + prod3(M(cpu, mbase, (unsigned)l, 0), vx, M(cpu, mbase, (unsigned)l, 1), vy,
+            r[l] = (t[l] * 4096) + prod3(M(cpu, mbase, (unsigned)l, 0), vx, M(cpu, mbase, (unsigned)l, 1), vy,
                                         M(cpu, mbase, (unsigned)l, 2), vz);
     } else
     #pragma GCC unroll 3
@@ -374,7 +525,7 @@ static inline __attribute__((always_inline)) void mvmva(CPUState *cpu, uint32_t 
     for (l = 0; l < 3; l++) {
         int64_t r;
         if (cv != 2 && g_gte_rapido && t_pequeno((uint32_t)t[0], (uint32_t)t[1], (uint32_t)t[2]))
-            r = ((int64_t)t[l] << 12) + prod3(m[l * 3], v[0], m[l * 3 + 1], v[1], m[l * 3 + 2], v[2]);
+            r = ((int64_t)t[l] * 4096) + prod3(m[l * 3], v[0], m[l * 3 + 1], v[1], m[l * 3 + 2], v[2]);
         else if (cv == 2) {
             /* bug do FC: a 1ª coluna só afeta as flags */
             int64_t lixo = A(l + 1, ((int64_t)t[l] * 4096) + mul32(m[l * 3], v[0]));
@@ -393,12 +544,23 @@ static __attribute__((noinline)) void gte_execute_corpo(CPUState *cpu, uint32_t 
 #include "prof.h"
 unsigned long long g_prof_gte;
 unsigned long g_prof_gte_n;
+/* V45: perfil por comando (índice = cmd & 0x3F): quantos e quantos ciclos.
+ * Só no ELF com log (o Makefile passa PS2_LOG_BLOCOS para o gte.o): no ELF
+ * de jogar não custa nada a mais. */
+unsigned long g_prof_gte_cmd_n[64];
+unsigned long long g_prof_gte_cmd_c[64];
+#if defined(PS2_LOG_BLOCOS) && PS2_LOG_BLOCOS > 0
+#define GTE_PROF_CMD(cmd, dt) do { g_prof_gte_cmd_c[(cmd) & 0x3Fu] += (dt); g_prof_gte_cmd_n[(cmd) & 0x3Fu]++; } while (0)
+#else
+#define GTE_PROF_CMD(cmd, dt) do { (void)(cmd); (void)(dt); } while (0)
+#endif
+#define GTE_PROF_FIM(cmd, t0) do { uint32_t dt_ = (uint32_t)(prof_agora() - (t0)); \
+    g_prof_gte += dt_; g_prof_gte_n++; GTE_PROF_CMD(cmd, dt_); } while (0)
 void gte_execute(CPUState *cpu, uint32_t cmd)
 {
     uint32_t t0 = prof_agora();
     gte_execute_corpo(cpu, cmd);
-    g_prof_gte += (uint32_t)(prof_agora() - t0);
-    g_prof_gte_n++;
+    GTE_PROF_FIM(cmd, t0);
 }
 
 static inline __attribute__((always_inline)) void gte_corpo(CPUState *cpu, uint32_t cmd)
@@ -409,9 +571,14 @@ static inline __attribute__((always_inline)) void gte_corpo(CPUState *cpu, uint3
 
     FLAG = 0;
     switch (cmd & 0x3Fu) {
-    case 0x01: rtp(cpu, 0, sh, lm, 1); break;                          /* RTPS */
-    case 0x30: rtp(cpu, 0, sh, lm, 0); rtp(cpu, 1, sh, lm, 0);         /* RTPT */
-               rtp(cpu, 2, sh, lm, 1); break;
+    case 0x01:                                                         /* RTPS */
+        if (__builtin_expect(g_gte_rapido && t_pequeno(C(5), C(6), C(7)), 1)) rtp_rapido(cpu, 1, sh, lm);
+        else rtp_lento(cpu, 0, sh, lm);
+        break;
+    case 0x30:                                                         /* RTPT */
+        if (__builtin_expect(g_gte_rapido && t_pequeno(C(5), C(6), C(7)), 1)) rtp_rapido(cpu, 3, sh, lm);
+        else rtp_lento(cpu, 1, sh, lm);
+        break;
     case 0x06: {                                                       /* NCLIP */
         int32_t x0 = lo16(D(12)), y0 = hi16(D(12)), x1 = lo16(D(13)), y1 = hi16(D(13));
         int32_t x2 = lo16(D(14)), y2 = hi16(D(14));
@@ -484,7 +651,7 @@ static inline __attribute__((always_inline)) void gte_corpo(CPUState *cpu, uint3
  * comando fixo o compilador resolve sf/lm/matriz/vetor/translação e corta
  * a decodificação e os desvios; o código gerado e o nativo chamam estes. */
 #define GTE_K(x) void gte_k_##x(CPUState *cpu) { uint32_t t0 = prof_agora(); gte_corpo(cpu, 0x##x##u); \
-    g_prof_gte += (uint32_t)(prof_agora() - t0); g_prof_gte_n++; }
+    GTE_PROF_FIM(0x##x##u, t0); }
 GTE_LISTA_K(GTE_K)
 #undef GTE_K
 
@@ -522,7 +689,8 @@ void gte_bench(void)
             for (i = 1; i < 12; i++) if (i == 1 || i == 3 || i == 5 || (i >= 8 && i <= 11))
                 a.gte_data[i] = (uint32_t)(int32_t)(int16_t)a.gte_data[i];
             sem = sem * 1103515245u + 12345u;
-            cmd = ops[(sem >> 8) % (sizeof ops / sizeof ops[0])] | (sem & 0x1FE0000u) | (sem & (1u << 19)) | ((sem << 3) & (1u << 10));
+            /* V45: bits 13..24 (cv, v, mx, sf do MVMVA); antes 17..24 deixava cv/v de fora */
+            cmd = ops[(sem >> 8) % (sizeof ops / sizeof ops[0])] | (sem & 0x1FFE000u) | ((sem << 3) & (1u << 10));
             b = a;
             g_gte_rapido = 1; gte_execute_corpo(&a, cmd);
             g_gte_rapido = 0; gte_execute_corpo(&b, cmd);
@@ -531,6 +699,7 @@ void gte_bench(void)
             }
         }
         g_gte_rapido = dif == 0;   /* qualquer diferença: fica no caminho completo */
+        g_gte_autoteste_dif = (long)dif;
         printf("bench: gte autoteste rapido x completo: 20000 casos, %lu diferencas (rapido %s)\n",
                dif, g_gte_rapido ? "ligado" : "DESLIGADO");
     }

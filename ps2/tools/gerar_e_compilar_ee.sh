@@ -26,7 +26,10 @@ if ! grep -q "scan do port PS2" seeds/ghidra_funcs.txt; then
 fi
 
 mkdir -p disc
-for f in "$RAIZ"/*.bin "$RAIZ"/*.cue; do ln -sf "$f" disc/; done
+# O dump do jogo fica em "tekken 3 ps2/ROM" (fora do Codigo)
+ROM="$RAIZ/../ROM"
+[ -f "$ROM/Tekken 3 (USA).cue" ] || { echo "erro: não achei \"Tekken 3 (USA).cue\" em $ROM" >&2; exit 1; }
+for f in "$ROM"/*.bin "$ROM"/*.cue; do ln -sf "$(realpath "$f")" "disc/$(basename "$f")"; done
 python3 psxrecomp/psxrecomp_cli.py generate --config game.toml \
   --project-root . --disc "disc/Tekken 3 (USA).cue" --no-toolchain-download
 

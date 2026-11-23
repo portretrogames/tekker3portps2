@@ -4,14 +4,19 @@
 #include <stdio.h>
 
 unsigned long g_ps2_pad_trocas, g_ps2_pad_leituras;
+void ps2_diag(unsigned evento, uint32_t valor);   /* linha do tempo (nativo_ganchos.c) */
 
 uint16_t ps2_pad_botoes[2] = { 0xFFFFu, 0xFFFFu };
+/* V59: 1 = a porta responde como controle. A 1 sempre; a 2 só com o controle
+ * 2 do PS2 ligado (video_gs.c), senão o jogo vê a porta vazia. */
+uint8_t  ps2_pad_ligado[2] = { 1u, 0u };
 
 static uint16_t ctrl, modo, baud;
 static uint8_t  rx, rx_cheio, ack, irq;
 static int      etapa;          /* posição na conversa com o dispositivo */
 static int      alvo;           /* 0 = nenhum, 1 = controle, 2 = memory card */
 static int      ack_pend;       /* IRQ de ACK agendada */
+static int      ack_novo;       /* ACK entregue e ainda não visto por ps2_pad_ack_ocupado */
 static uint32_t ack_quando;
 
 void ps2_pad_reset(void)
@@ -19,7 +24,7 @@ void ps2_pad_reset(void)
     ctrl = modo = baud = 0;
     rx = 0xFF; rx_cheio = ack = irq = 0;
     etapa = 0; alvo = 0;
-    ack_pend = 0;
+    ack_pend = 0; ack_novo = 0;
 }
 
 /* Entrega a IRQ de ACK ~100 ciclos PS1 (~3 us) depois do byte. */
@@ -27,9 +32,28 @@ void ps2_pad_tick(void)
 {
     if (ack_pend && (uint32_t)(ps2_ps1_cycles() - ack_quando) >= 100u) {
         ack_pend = 0;
+        ack_novo = 1;
         irq = 1;
         ps2_irq_raise(IRQ_PAD);
+        ps2_diag(28u, 0);               /* linha do tempo: ACK entregue */
     }
+}
+
+/* io.c (esperas da libpad adiantadas): 1 = há um ACK a caminho, ou um ACK
+ * foi entregue depois da última consulta. Nos dois casos a leitura do
+ * contador que fez a consulta tem de mostrar o tempo real, para o jogo ver o
+ * ACK no I_STAT antes de o prazo dele estourar.
+ * NÃO chama ps2_pad_tick(): o ACK só pode sair nos pontos de sempre (leitura
+ * de JOY_STAT e de I_STAT, entrada de exceção). Depois de mandar um byte o
+ * jogo lê o contador (800951B8) e SÓ ENTÃO limpa o I_STAT (800936AC); um
+ * ACK entregue nessa leitura era apagado e o jogo desistia do controle
+ * (console, 21/11/2026: nenhuma leitura completa; no PCSX2 passava porque
+ * os ~100 ciclos do ACK ainda não tinham corrido nesse ponto). */
+int ps2_pad_ack_ocupado(void)
+{
+    if (ack_pend) return 1;
+    if (ack_novo) { ack_novo = 0; return 1; }
+    return 0;
 }
 
 /* Um byte trocado com o dispositivo selecionado. */
@@ -48,8 +72,8 @@ static void trocar(uint8_t tx)
     }
     if (etapa == 0) {
         alvo = tx == 0x01 ? 1 : tx == 0x81 ? 2 : 0;
-        /* só o controle da porta 1 existe */
-        if (alvo == 1 && porta == 0) { rx = 0xFF; ack = 1; etapa = 1; }
+        /* V59: controle nas portas 1 e 2 (a 2 só se ligada) */
+        if (alvo == 1 && ps2_pad_ligado[porta]) { rx = 0xFF; ack = 1; etapa = 1; }
         else { alvo = 0; }
     } else if (alvo == 1) {
         switch (etapa) {
@@ -61,6 +85,7 @@ static void trocar(uint8_t tx)
         etapa = ack ? etapa + 1 : 0;
     }
     rx_cheio = 1;
+    ps2_diag(27u, (uint32_t)tx | ((uint32_t)rx << 8) | ((uint32_t)porta << 16) | ((uint32_t)ack << 20));
     if (alvo == 1 && etapa == 0) g_ps2_pad_leituras++;
     if (n_log < 12u) { n_log++;
         printf("pad: tx=%02x rx=%02x ctrl=%04x etapa=%d ack=%d\n", tx, rx, ctrl, etapa, ack); }
@@ -102,6 +127,9 @@ void ps2_pad_write(uint32_t off, uint32_t v, unsigned w)
     case 0x40: trocar((uint8_t)v); break;
     case 0x48: modo = (uint16_t)v; break;
     case 0x4A:
+        /* V59: outra porta = outro aparelho; a conversa da anterior acaba
+         * (o da porta nova não estava selecionado). */
+        if ((v ^ ctrl) & 0x2000u) { etapa = 0; alvo = 0; }
         ctrl = (uint16_t)(v & ~0x0050u);
         if (v & 0x0010u) { irq = 0; }                   /* ACK da IRQ */
         if (v & 0x0040u) { ps2_pad_reset(); }           /* reset */

@@ -46,7 +46,11 @@ Teste final: PS2 real pelo OPL, com pendrive em exFAT. Teste rápido: PCSX2.
   (ex.: `ps2/runtime/memory.c`, `gpu_gs.c`, `gte.c`, `spu2.c`, `cd_usb.c`).
 
 ## Onde trabalhar
-Trabalhe DIRETO em `D:\PROJETOS\tekken 3 ps2` (nunca em worktree separado).
+Trabalhe DIRETO em `~/PROJETOS/tekken 3 ps2/Codigo` (o repositório git; nunca
+em worktree separado). As outras pastas do projeto (`ROM/` com o dump,
+`ELF OU ISO TESTE/`, `Github/`, `INSTRUÇÕES IA/`, `BACKUPS/`) estão explicadas
+em `../INSTRUÇÕES IA/LEIA-PRIMEIRO.md`. O `.bin` em `ps2/` é um atalho para
+`../ROM`.
 Faça commit ao fim de cada etapa. Antes do commit, `git status` não pode
 mostrar nada de `gerado/`, `referencia/`, `build/`, `*.elf`, `*.bin`, `*.cue`,
 `SLUS_*` ou `docs/ultimo_log_pcsx2.txt`.

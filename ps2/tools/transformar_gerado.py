@@ -13,7 +13,7 @@ gerado/ nunca é editado; só a cópia compilada muda.
    Também vale para SLUS_004.02_decls.h (psx_swl/psx_swr), copiado para
    build/r/ — o #include "..." dos shards acha a cópia primeiro.
 """
-import re, sys
+import os, re, sys
 
 ent, sai = sys.argv[1], sys.argv[2]
 s = open(ent, encoding='utf-8').read()
@@ -33,6 +33,16 @@ s, n_mem = re.subn(r'\bcpu->(read|write)_(word|half|byte)\(', r'ps2_fast_\1_\2('
 if re.search(r'cpu->(read|write)_(word|half|byte)\b', s):
     sys.exit('transformar_gerado: acesso de memoria por ponteiro que nao foi trocado')
 s = re.sub(r'^(void func_[0-9A-Fa-f_]+)\(CPUState\* cpu\)', r'\1(CPUState* restrict cpu)', s, flags=re.M)
+
+# V56: acessos relativos ao sp (gpr[29]) vão direto pela janela RAM+scratchpad
+# (runtime/janela.h): sem o teste de região e sem a marcação de código sujo.
+# A pilha do jogo fica sempre na RAM (ou no scratchpad) e nunca em cima de
+# código. Com GEN_OPT="-O2 -DPS2_JANELA_VERIFICAR=1" cada acesso é conferido.
+_BITS = {'word': '32', 'half': '16', 'byte': '8'}
+s, _n_pw = re.subn(r'ps2_fast_write_(word|half|byte)\(cpu->gpr\[29\](?: \+ (-?\d+))?, ',
+                   lambda m: 'ps2_pil_wr%s(cpu->gpr[29], %s, ' % (_BITS[m.group(1)], m.group(2) or '0'), s)
+s, _n_pr = re.subn(r'psx_cyc_load_(word|half|byte)\(cpu, cpu->gpr\[29\](?: \+ (-?\d+))?, \d+, 0x[0-9A-Fa-f]+u\)',
+                   lambda m: 'ps2_pil_rd%s(cpu->gpr[29], %s)' % (_BITS[m.group(1)], m.group(2) or '0'), s)
 
 # 7. Rotinas nativas (V26, tools/nativo.py + runtime/nativo_ganchos.c): na
 # entrada normal (cpu->pc == 0) a função chama a versão nativa.
@@ -56,6 +66,19 @@ cab = 'void func_800296C4(CPUState* restrict cpu)\n{\n'
 if cab in s:
     s = s.replace(cab, cab + '    { extern void ps2_quadro_espera(void); if (cpu->pc == 0u) ps2_quadro_espera(); }\n', 1)
 
+# V48: VSync() da libetc espera o VBlank em v_wait(alvo, tempo) (80085B20), que
+# desiste depois de tempo<<15 voltas e escreve "VSync: timeout". No PS1 isso
+# passa de 16,7 ms; no código compilado a volta é bem mais rápida (~2,5 ms no
+# PCSX2) e o VSync(0) do tocador do vídeo da abertura desistia ~5 vezes por
+# segundo, antes do VBlank. Aqui o limite fica 8x maior (só na entrada normal;
+# o laço guarda o limite na pilha logo no começo). O VSync passa 0 ou 1 (ou
+# n-1 em VSync(n)); com o <<3 daqui e o <<15 do v_wait o tempo sobe 18 bits:
+# a partir de 0x2000 chegaria a 2^31 e o limite ficaria negativo, então de
+# 0x1000 para cima (com folga) fica como está.
+cab = 'void func_80085B20(CPUState* restrict cpu)\n{\n'
+if cab in s:
+    s = s.replace(cab, cab + '    if (cpu->pc == 0u && cpu->gpr[5] < 0x1000u) cpu->gpr[5] <<= 3;   /* V48: VSync sem timeout cedo */\n', 1)
+
 # V41: diagnóstico — entrada da lógica da luta (8002AE58) e fim da espera do
 # quadro (8006B6FC é a 1ª chamada depois de 800296C4 no laço principal 80028BA0)
 # V42: + 800295F4 (teste "contador do timer 2 >= 2" que libera o passo de
@@ -65,6 +88,16 @@ for _f, _g in (('8002AE58', 'ps2_diag_luta'), ('8006B6FC', 'ps2_diag_espera_fim'
     cab = 'void func_%s(CPUState* restrict cpu)\n{\n' % _f
     if cab in s:
         s = s.replace(cab, cab + '    { extern void %s(void); if (cpu->pc == 0u) %s(); }\n' % (_g, _g), 1)
+
+# V55: laço da luta 800508C4: o passo de recuperação (sem desenho) só roda se
+# a lógica 8002AE58 devolveu 1. runtime/nativo_ganchos.c conta os valores
+# devolvidos (relatório "luta: retornos") e pode liberar a recuperação também
+# na apresentação do round (make RECUP_APRES=1).
+_ant = re.compile(r'^\s*int _bc_800508D0\s*=\s*\(cpu->gpr\[16\]\s*!=\s*cpu->gpr\[19\]\);', re.M)
+if 'block_800508D0:' in s:
+    s, _n = _ant.subn('    int _bc_800508D0; { extern int ps2_luta_sem_recup(CPUState *c); _bc_800508D0 = ps2_luta_sem_recup(cpu); }', s)
+    if not _n or re.search(r'int _bc_800508D0\s*=', s):
+        raise SystemExit('transformar_gerado: o teste do laço da luta (800508D0) não foi trocado em todas as cópias (RECUP_APRES)')
 
 # V36: o port ainda não tem som. O tick do sequenciador de som do jogo
 # (80088BA8, chamado na IRQ do timer 2) era ~18% do EE ("quente 80088c00")
@@ -148,7 +181,7 @@ static const PsxGameDispatchEntry* psx_game_find_entry(uint32_t addr) {
 }'''
     if velho not in s:
         sys.exit('transformar_gerado: chamada do despacho nao encontrada')
-    s = s.replace(velho, '''#ifdef _EE
+    s = s.replace(velho, '''#if defined(_EE) && !defined(PS2_LIMPO)
     {
         uint32_t c;
         __asm__ volatile("mfc0 %0, $9" : "=r"(c));
@@ -164,7 +197,7 @@ static const PsxGameDispatchEntry* psx_game_find_entry(uint32_t addr) {
 /* Imprime as funções que mais gastaram tempo desde a última chamada. */
 void ps2_prof_funcoes(void)
 {
-    enum { TOP = 16 };
+    enum { TOP = 40 };
     uint32_t top_ad[TOP], top_c[TOP];
     unsigned long long total = 0;
     uint32_t i = 0, k;
@@ -227,7 +260,56 @@ uint32_t g_ps2_prof_t, g_ps2_prof_ult;
         sys.exit('transformar_gerado: vsync_query do despacho nao encontrado')
     s = s.replace(velho, "    /* (V31: psx_vsync_query_hle_try removido: no PS2 sempre 0) */", 1)
     s = s.replace('/* ps2: perfil por função (V22) */', 'uint32_t g_ps2_ver_ok[PSX_GAME_DISPATCH_COUNT];   /* V31/V33 */\n/* ps2: perfil por função (V22) */', 1)
+    # V56: as faixas de código do despacho dizem quais páginas da RAM têm
+    # código compilado (ram.h: g_cod_pag)
+    s += '''
+/* ps2 (V56): páginas da RAM com código compilado (ver ram.h) */
+void ps2_despacho_paginas_de_codigo(void)
+{
+    extern void ps2_cod_so_codigo(const uint32_t *faixas, uint32_t n);
+    /* lida como pares {início, tamanho}, como dirty_ram_text_native_ok_ranges_from */
+    _Static_assert(sizeof(k_psx_game_code_ranges[0]) == 2u * sizeof(uint32_t), "faixa = {lo, len}");
+    ps2_cod_so_codigo(&k_psx_game_code_ranges[0].lo,
+                      (uint32_t)(sizeof(k_psx_game_code_ranges) / sizeof(k_psx_game_code_ranges[0])));
+}
+'''
     if '#include "fast_memory.h"' not in s:
         s = s.replace('/* ps2: perfil por função (V22) */', '#include "fast_memory.h"\n/* ps2: perfil por função (V22) */', 1)
+
+# V59: checagem de interrupção só nos desvios para TRÁS (laços) e nas
+# outras saídas (chamadas, saltos por registrador). Nos desvios para a
+# frente ela saía em ~82% dos desvios do jogo (~8 instruções cada, ~1,6 MB
+# de código): um trecho sem laço termina logo e a interrupção é vista no
+# próximo laço. PS2_IRQ_FRENTE=1 (make IRQ_FRENTE=1) mantém todas.
+if not ent.endswith('_dispatch.c') and not ent.endswith('_decls.h') and os.environ.get('PS2_IRQ_FRENTE', '0') != '1':
+    linhas = s.split('\n')
+    bloco = None
+    tiradas = 0
+    chk = re.compile(r'psx_check_interrupts_at\(cpu, 0x([0-9A-Fa-f]{8})u\);\s*')
+    for i, l in enumerate(linhas):
+        m = re.match(r'\s*block_([0-9A-Fa-f]{8})\s*:', l)
+        if m:
+            bloco = int(m.group(1), 16)
+            continue
+        # começo de função (qualquer variação da assinatura): esquece o bloco
+        if re.match(r'\s*(?:static\s+)?(?:inline\s+)?void\s+\w+\s*\(\s*CPUState\s*\*', l):
+            bloco = None
+            continue
+        if bloco is None or 'psx_check_interrupts_at' not in l:
+            continue
+        def _tira(m, i=i, l=l):
+            global tiradas
+            alvo = m.group(1)
+            resto = l[m.end():]
+            prox = linhas[i + 1] if i + 1 < len(linhas) else ''
+            vai = resto.startswith('goto block_%s;' % alvo) or (not resto.strip() and prox.strip().startswith('goto block_%s;' % alvo))
+            # (alvo e rótulo com o mesmo texto: o gerador escreve os dois em maiúsculas)
+            if vai and int(alvo, 16) > bloco:
+                tiradas += 1
+                return ''
+            return m.group(0)
+        linhas[i] = chk.sub(_tira, l)
+    s = '\n'.join(linhas)
+    sys.stderr.write('transformar_gerado: %d checagens de interrupcao para a frente tiradas\n' % tiradas)
 
 open(sai, 'w', encoding='utf-8').write(s)

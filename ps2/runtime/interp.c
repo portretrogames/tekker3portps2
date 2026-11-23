@@ -11,9 +11,12 @@
 #include "ram.h"
 #include "memory.h"
 #include "bios_hle.h"
+#include "trace_fmv.h"
+#include "nativo_overlay.h"
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 extern int psx_game_is_function_entry(uint32_t addr);
 extern int psx_syscall(CPUState *cpu, uint32_t code);
@@ -37,11 +40,18 @@ extern int psx_game_text_native_ok(uint32_t addr);
 
 static int sai_para(uint32_t alvo)
 {
+    /* V48: alvos que NÃO são entrada de função compilada (a tabela do
+     * despacho é constante, então a resposta não muda). Os laços do overlay
+     * faziam uma busca binária em 22 mil funções a cada desvio tomado. */
+    static uint32_t nao_entrada[1024];
+    unsigned h = (alvo >> 2) & 1023u;
     uint32_t f = alvo & 0x1FFFFFFFu;
     if (f == 0xA0u || f == 0xB0u || f == 0xC0u || alvo == 0x00000F00u)
         return 1;
+    if (nao_entrada[h] == alvo && alvo != 0u) return 0;
     /* Só sai se houver código compilado DE VERDADE (não um stub de dado). */
-    return psx_game_is_function_entry(alvo) && psx_game_text_native_ok(alvo);
+    if (!psx_game_is_function_entry(alvo)) { nao_entrada[h] = alvo; return 0; }
+    return psx_game_text_native_ok(alvo);
 }
 
 static void erro(CPUState *cpu, uint32_t pc, uint32_t ins, const char *msg)
@@ -178,6 +188,44 @@ static int passo(CPUState *cpu, uint32_t pc, uint32_t *alvo)
     return salta;
 }
 
+/*
+ * V48: rotinas de overlay traduzidas para C (tools/nativo.py com
+ * tools/nativas_overlay.txt, em build/r/nativo.c). Antes de usar a versão
+ * nativa confere se a RAM tem exatamente o código que foi traduzido: outro
+ * overlay pode estar no mesmo endereço (aí segue interpretando).
+ */
+static int nativa_overlay(CPUState *cpu, uint32_t pc)
+{
+    unsigned i;
+    for (i = 0; i < ps2_nat_n_overlays; i++) {
+        const Ps2NatOverlay *o = &ps2_nat_overlays[i];
+        uint32_t f = pc & 0x1FFFFFFFu;
+        if (pc != o->ini || f + o->n * 4u > 0x200000u) continue;
+        /* bytes da RAM do PS1 = palavras little-endian, como no EE */
+        if (memcmp(&g_ps1_ram[f], o->cod, o->n * 4u) != 0) continue;
+        cpu->pc = pc;
+        return ps2_nat_executar_overlay(cpu, pc, o->nat);   /* cpu->pc = retorno */
+    }
+    return 0;
+}
+
+/* Verificação das rotinas nativas (NAT_VERIFICAR=1): roda o original
+ * interpretado de pc até voltar a ret, sem atender interrupções. */
+unsigned ps2_interp_ate(CPUState *cpu, uint32_t pc, uint32_t ret)
+{
+    unsigned n = 0;
+    while (pc != ret && n < 50000000u) {
+        uint32_t alvo, ignorado;
+        n++;
+        if (passo(cpu, pc, &alvo)) {
+            (void)passo(cpu, pc + 4u, &ignorado);
+            pc = alvo;
+        } else pc += 4u;
+    }
+    cpu->pc = pc;
+    return n;
+}
+
 int ps2_interp_run(CPUState *cpu)
 {
     static unsigned contagem;
@@ -185,16 +233,27 @@ int ps2_interp_run(CPUState *cpu)
 
     if (!ps2_ram_hit(pc))
         return 0;
+    if (nativa_overlay(cpu, pc)) {
+        pc = cpu->pc;
+        if (sai_para(pc) || !ps2_ram_hit(pc)) return 1;
+    }
     for (;;) {
         uint32_t alvo, ignorado;
         if (passo(cpu, pc, &alvo)) {
             (void)passo(cpu, pc + 4u, &ignorado);        /* delay slot */
             pc = alvo;
             if (sai_para(pc)) { cpu->pc = pc; return 1; }
+            if (nativa_overlay(cpu, pc)) {
+                pc = cpu->pc;
+                if (sai_para(pc) || !ps2_ram_hit(pc)) return 1;
+            }
         } else {
             pc += 4u;
         }
         if ((++contagem & 255u) == 0u) {
+#ifdef PS2_TRACE_FMV
+            if (g_tr_ativo) ps2_tr_pci(pc);
+#endif
             cpu->pc = pc;
             ps2_irq_poll(cpu, pc);                       /* pode fazer longjmp */
         }

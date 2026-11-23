@@ -53,7 +53,7 @@ void ps2_irq_poll_lento(CPUState *cpu, uint32_t pc)
 {
     extern int ps2_bios_em_excecao(void);
     g_ps2_contagem_irq = 256;
-#ifdef _EE
+#if defined(_EE) && !defined(PS2_LIMPO)
     {
         static uint32_t ultimo;
         uint32_t c, d;
@@ -64,11 +64,13 @@ void ps2_irq_poll_lento(CPUState *cpu, uint32_t pc)
         g_prof_hist[(pc >> 10) & 2047u] += d >> 8;
         g_prof_ciclos_amostras += d;
     }
-#else
+#elif !defined(PS2_LIMPO)
     g_prof_hist[(pc >> 10) & 2047u]++;
 #endif
+#ifndef PS2_LIMPO
     g_prof_amostras++;
     if (ps2_bios_em_excecao()) g_prof_amostras_exc++;
+#endif
     ps2_irq_poll(cpu, pc);
 }
 void psx_check_interrupts_at(CPUState *cpu, uint32_t pc)

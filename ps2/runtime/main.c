@@ -10,6 +10,8 @@
  *
  * A execução para com log quando encontra código ou hardware não suportado.
  */
+#include "abertura.h"
+#include "kit/som.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -18,6 +20,8 @@
 #include "cpu_state.h"
 #include "memory.h"
 #include "ram.h"
+#include "pmc.h"
+#include "quente.h"
 #include "bios_hle.h"
 #include "cdrom.h"
 #include "interp.h"
@@ -29,8 +33,23 @@
 
 extern int psx_dispatch_game_compiled(CPUState *cpu, uint32_t addr);
 
-/* Global: o CPUState é grande e não deve ficar na pilha do EE. */
-CPUState g_ps2_cpu;
+/* Global: o CPUState é grande e não deve ficar na pilha do EE.
+ * V56: é um apelido para dentro do bloco quente de ram.c (ram.h: lugar fixo
+ * no cache de dados). */
+extern CPUState g_ps2_cpu;
+typedef char cpu_cabe_no_bloco[(PS2_CPU_NO_CACHE + sizeof(CPUState) <= PS2_COD_PAG_NO_CACHE) ? 1 : -1];
+
+/* Despacho de uma função do jogo. Na varredura da pilha (make PMC=1
+ * PMC_VARRE=2, pmc.h) cada despacho começa na posição de pilha da vez. */
+#if PMC_VARRE_JOGO
+static int __attribute__((noinline)) despachar(CPUState *cpu, uint32_t alvo)
+{
+    PS2_PILHA_EM(PMC_PILHA_JOGO(PS2_PILHA_JOGO));
+    return psx_dispatch_game_compiled(cpu, alvo);
+}
+#else
+#define despachar(cpu, alvo) psx_dispatch_game_compiled((cpu), (alvo))
+#endif
 
 /* Quantas vezes o laço de despacho rodou (diagnóstico). */
 static unsigned long g_despachos;
@@ -110,6 +129,7 @@ static int carregar_exe(const char *caminho, PsxExeInfo *info)
     {
         extern void ps2_cod_registrar(uint32_t endereco, uint32_t tamanho);
         ps2_cod_registrar(info->t_addr, info->t_size);
+        { extern void ps2_despacho_paginas_de_codigo(void); ps2_despacho_paginas_de_codigo(); }
     }
     printf("loader: %s carregado: %lu bytes em %08lx, PC=%08lx\n", caminho,
            (unsigned long)info->t_size, (unsigned long)info->t_addr,
@@ -214,6 +234,7 @@ static int carregar_exe_do_disco(PsxExeInfo *info)
     {
         extern void ps2_cod_registrar(uint32_t endereco, uint32_t tamanho);
         ps2_cod_registrar(info->t_addr, info->t_size);
+        { extern void ps2_despacho_paginas_de_codigo(void); ps2_despacho_paginas_de_codigo(); }
     }
     printf("loader: %s lido do disco: %lu bytes em %08lx, PC=%08lx\n", EXE_NOME,
            (unsigned long)info->t_size, (unsigned long)info->t_addr, (unsigned long)info->pc0);
@@ -228,6 +249,17 @@ static int ps2_interp_run_medido(CPUState *cpu)
     int r = ps2_interp_run(cpu);
     g_prof_interp += (uint32_t)(prof_agora() - t0);
     return r;
+}
+
+/* V53: marco da inicialização no log, gravado na hora (no console o log só
+ * ia para o pendrive no começo e a cada ~30 s: um travamento no boot não
+ * deixava rastro). */
+static void etapa(const char *texto)
+{
+    printf("etapa: %s\n", texto);
+#if PS2_LOG_BLOCOS > 0
+    kit_log_gravar();
+#endif
 }
 
 int main(int argc, char **argv)
@@ -279,9 +311,19 @@ int main(int argc, char **argv)
         }
         /* PS2 real: o log vai para tekken3_log.txt ao lado do ELF; video_gs.c
          * grava a cada PS2_LOG_BLOCOS relatórios (só quando o CD não está lendo). */
-        if (r == KIT_ARM_OK && PS2_LOG_BLOCOS > 0) {
-            snprintf(log, sizeof(log), "%s%s", pasta_elf, JOGO_LOG);
-            if (kit_log_iniciar(log)) {
+#ifndef PS2_LOG_REDE
+#define PS2_LOG_REDE 0
+#endif
+        /* make LOG_REDE=1: pela rede (host:) o log também vai para um arquivo
+         * com buffer, gravado de tempos em tempos como no pendrive (o printf
+         * direto esperava o PC a cada linha) */
+        if ((r == KIT_ARM_OK || (PS2_LOG_REDE && r == KIT_ARM_HOST)) && PS2_LOG_BLOCOS > 0) {
+            /* pela rede o log vai sempre para host: (pasta_elf pode ter ficado
+             * com o caminho do pendrive se o do ELF não coube) */
+            snprintf(log, sizeof(log), "%s%s", r == KIT_ARM_HOST ? "host:" : pasta_elf, JOGO_LOG);
+            if (!kit_log_iniciar(log)) {
+                printf("log: nao consegui abrir %s (%s)\n", log, kit_log_estado());
+            } else {
                 extern void ps2_cdrom_io_barreira(void);
                 kit_log_antes_de_gravar(ps2_cdrom_io_barreira);
                 printf("log: gravando em %s\n", log);
@@ -292,13 +334,28 @@ int main(int argc, char **argv)
         }
         /* V43: versão sem log no console: o texto dos relatórios ia para o
          * IOP (fio, uma chamada por linha) sem ninguém ler; agora é descartado. */
-        if (r == KIT_ARM_OK && PS2_LOG_BLOCOS == 0) kit_log_silenciar();
+        /* Pela rede (host: do ps2link) o stdout é sem buffer e cada printf
+         * espera o PC: o relatório de 2 s custava ~10% do tempo do jogo. Sem
+         * log, cala em qualquer caminho. */
+        if (PS2_LOG_BLOCOS == 0) kit_log_silenciar();
+        /* V47: som pelo audsrv (freesd + audsrv embutidos), 48 kHz estéreo */
+        etapa("som: iniciando");
+        kit_som_iniciar(48000);
+        etapa(kit_spu1_pronto() ? "som: pronto, canal da SPU2 ligado" : "som: pronto, canal da SPU2 DESLIGADO");
     }
 
     memset(cpu, 0, sizeof(*cpu));
     ps2_memory_init(cpu);               /* zera RAM e liga cpu->read/write */
     if (!ps2_video_init()) return 1;
-    kit_controle_iniciar(1);            /* sem controle o jogo segue mesmo assim */
+    etapa("video: pronto");
+    kit_controle_iniciar(2);            /* V59: portas 1 e 2; sem controle o jogo segue mesmo assim */
+    etapa("controle: pronto");
+    { extern void ps2_cartao_iniciar(void); ps2_cartao_iniciar(); }   /* V59: memory card */
+    etapa("cartao: pronto");
+#if PS2_ABERTURA
+    ps2_abertura(JOGO_VERSAO_NUM);      /* V59: telas de início (abertura.c) */
+    etapa("abertura: fim");
+#endif
 
     /* Disco primeiro: procura a imagem na pasta do ELF (ver cdrom.c). */
     {
@@ -309,7 +366,9 @@ int main(int argc, char **argv)
             memcpy(pasta, caminho, n);
             pasta[n] = '\0';
         }
-        if (!ps2_cdrom_abrir(pasta)) {
+        /* V53: sem o disco ao lado do ELF (ex.: ELF de teste noutra pasta do
+         * OPL), tenta a pasta padrão do jogo no pendrive */
+        if (!ps2_cdrom_abrir(pasta) && !ps2_cdrom_abrir(JOGO_PASTA_USB)) {
             printf("ERRO: imagem do disco nao encontrada. Coloque TEKKEN3.BIN "
                    "(faixa 1 do jogo) ao lado do tekken3.elf.\n");
             kit_log_gravar();
@@ -338,6 +397,7 @@ int main(int argc, char **argv)
     printf("Entrando no jogo em %08lx (sp=%08lx gp=%08lx)\n",
            (unsigned long)cpu->pc, (unsigned long)sp,
            (unsigned long)info.gp0);
+    etapa("jogo: entrando");
 
     /*
      * Laço de despacho (trampolim CPS). O código gerado não chama a próxima
@@ -348,10 +408,13 @@ int main(int argc, char **argv)
      */
     /* Volta aqui (longjmp) quando uma interrupção é entregue ao jogo:
      * cpu->pc já aponta para o handler. */
+    /* V56: pilha do EE em posição fixa no cache de dados (quente.h). Antes do
+     * setjmp: a volta por longjmp restaura esta mesma posição. */
+    PS2_PILHA_EM(PS2_PILHA_JOGO);
     (void)setjmp(g_ps2_volta_ao_laco);
     for (;;) {
         uint32_t alvo = cpu->pc;
-        if (!psx_dispatch_game_compiled(cpu, alvo) &&
+        if (!despachar(cpu, alvo) &&
             !ps2_bios_call(cpu, alvo) &&
             !ps2_interp_run_medido(cpu)) {
             printf("PARADA: endereco %08lx nao esta no dispatch "

@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 # Roda o tekken3.elf no PCSX2 Linux sem tela (Xvfb) e grava o log.
-# Uso: bash ps2/tools/rodar_pcsx2_linux.sh [segundos=40]
+# Uso: bash ps2/tools/rodar_pcsx2_linux.sh [segundos=40] [outro.elf]
 # Requer: PCSX2 AppImage extraído em $PCSX2_DIR (squashfs-root) e as libs
 # OpenGL/EGL/xcb em $LIBS_DIR (extraídas de .deb com apt-get download).
 # Config em ~/.config/PCSX2 (HostFs ligado, BIOS real, renderer Software).
 set -u
 SEG="${1:-40}"
+ELF_ARG="${2:-}"
 AQUI="$(cd "$(dirname "$0")/.." && pwd)"
 PCSX2_DIR="${PCSX2_DIR:-$HOME/work/squashfs-root}"
 LIBS_DIR="${LIBS_DIR:-$HOME/work/debs/root/usr/lib/x86_64-linux-gnu}"
@@ -29,7 +30,7 @@ sleep 2
 export DISPLAY="$DISP"
 rm -f "$LOG"
 "$PCSX2_DIR/usr/bin/pcsx2-qt" -earlyconsolelog -logfile "$LOG" -batch \
-    -fastboot -- "$AQUI/tekken3.elf" >/dev/null 2>&1 & P=$!
+    -fastboot -- "${ELF_ARG:-$AQUI/tekken3.elf}" >/dev/null 2>&1 & P=$!
 sleep "$SEG"
 mkdir -p "$AQUI/build"
 LD_LIBRARY_PATH= import -window root "$TELA" 2>/dev/null

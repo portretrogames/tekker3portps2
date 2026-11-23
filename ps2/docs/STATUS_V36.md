@@ -65,7 +65,8 @@ real (a V33 marcava 118/120 e rodava a ~71%). A medida confiável é o
 - **Congelamentos de 0,3–0,9 s = gravação do log a cada 30 s** (V34). Para
   jogar/cronometrar: `make LOG_BLOCOS=0`. Log só em build de diagnóstico.
 - Timer 2: o jogo o reprograma ~590×/s; as ~140 IRQs/s são do próprio jogo.
-- **Perfil corrigido (V39, luta):** `8007e0b8` 16,5% (é o DrawOTag da libgpu:
+- **Perfil corrigido (V39, luta):** `8007e0b8` 16,5% (rotina interna da libgpu que inicia o DMA2 da OT — o
+  DrawOTag, `8007c998`, a põe na fila; nome corrigido em 19/11/2026 com o ghidra_psx_ldr;
   o custo é o processamento da lista no port — hash + conversão para o GS),
   nativa `80036cac` 13,5%, espera do quadro (`800296c4`+`8004ce54`) ~15%,
   depois uma cauda longa (`8003b71c` 3,9%, `80037a9c` 2,5%, `8003b1c4` 2,1%...).
