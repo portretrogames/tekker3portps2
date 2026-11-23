@@ -115,8 +115,10 @@
   /* enquanto confere ou grava, nada mais pode ser clicado */
   function setOcupado(sim) {
     ocupado = sim;
-    for (const id of ['arquivos', 'gravar', 'zip']) $(id).disabled = sim;
-    $('solta').style.pointerEvents = sim ? 'none' : '';
+    $('arquivos').disabled = sim;
+    $('gravar').disabled = sim || !conferido;
+    $('zip').disabled = sim || !conferido;
+    $('solta').style.opacity = sim ? '.5' : '';   /* continua recebendo o soltar (o navegador não abre o arquivo) */
   }
 
   function elfBytes() {
@@ -206,14 +208,14 @@
     if (ocupado || !conferido) return;
     const sel = conferido;              /* a seleção de agora, mesmo que mude depois */
     setOcupado(true);
-    let raiz;
-    try { raiz = await window.showDirectoryPicker({ id: 'pendrive-tekken3', mode: 'readwrite' }); }
-    catch (e) {
-      if (e.name !== 'AbortError') caixa('msg2', 'O navegador não liberou a pasta: ' + esc(e.message), true);
-      setOcupado(false); return;
-    }
-    caixa('msg2', ''); barra('barra2', 0);
     try {
+      let raiz;
+      try { raiz = await window.showDirectoryPicker({ id: 'pendrive-tekken3', mode: 'readwrite' }); }
+      catch (e) {
+        if (e.name !== 'AbortError') caixa('msg2', 'O navegador não liberou a pasta: ' + esc(e.message), true);
+        return;
+      }
+      caixa('msg2', ''); barra('barra2', 0);
       await gravarNaPasta(raiz, sel);
       $('estado2').textContent = 'Gravado.'; barra('barra2', null);
       caixa('msg2', '✓ Tudo gravado em <code>APPS/TEKKEN3</code>. Use "Remover com segurança" antes de tirar o pendrive.');
@@ -247,6 +249,7 @@
   ['dragenter', 'dragover'].forEach((t) => solta.addEventListener(t, (e) => { e.preventDefault(); solta.classList.add('sobre'); }));
   ['dragleave', 'drop'].forEach((t) => solta.addEventListener(t, (e) => { e.preventDefault(); solta.classList.remove('sobre'); }));
   solta.addEventListener('drop', (e) => escolher(e.dataTransfer.files));
+  setOcupado(false);
   if ('showDirectoryPicker' in window) { $('gravar').hidden = false; $('dicaGravar').hidden = false; }
   else $('semGravar').hidden = false;
   $('gravar').addEventListener('click', gravar);

@@ -74,7 +74,7 @@ const NucleoT3 = (() => {
     /* Duas faixas 1 (ou 2) = arquivos de mais de uma imagem: não dá para saber
        qual usar sem arriscar misturar discos. */
     if (c1.length > 1 || c2.length > 1)
-      throw new ErroDisco('VARIAS_IMAGENS', { nomes: [...c1, ...c2].map((p) => p.nome) });
+      throw new ErroDisco('VARIAS_IMAGENS', { nomes: [...new Set([...c1, ...c2].map((p) => p.nome))] });
     if (!c1.length) throw new ErroDisco('SEM_FAIXA1', { desconhecidos });
     return { f1: c1[0], f2: c2[0] || null, ignorados, desconhecidos };
   }

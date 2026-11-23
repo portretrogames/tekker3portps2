@@ -35,7 +35,7 @@ jobs:
           # Sem o criador a página teria dois links quebrados: aí o job falha e o
           # site publicado antes continua no ar.
           rm -rf /tmp/rel && mkdir -p /tmp/rel
-          TAG=$(gh release list --repo "$GITHUB_REPOSITORY" --limit 1 --json tagName --jq ".[0].tagName")
+          TAG=$(gh release list --repo "$GITHUB_REPOSITORY" --exclude-drafts --limit 1 --json tagName --jq ".[0].tagName")
           [ -n "$TAG" ] || { echo "::error::nenhuma release"; exit 1; }
           gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern "RetroGames_Tekken_3_PS2_V*.zip" --dir /tmp/rel
           for z in /tmp/rel/*.zip; do

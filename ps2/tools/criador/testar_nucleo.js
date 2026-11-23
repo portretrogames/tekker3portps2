@@ -43,7 +43,7 @@ function discoSintetico(cnf) {
   catch (e) { ok(e.codigo === 'SEM_FAIXA1' && e.desconhecidos[0].motivo === 'tamanho', 'tamanho errado recusado'); }
 
   try { N.classificar([fake('a.bin', N.T1_BYTES), fake('tudo.bin', N.TUDO_BYTES)]); ok(false, 'duas imagens devia falhar'); }
-  catch (e) { ok(e.codigo === 'VARIAS_IMAGENS' && e.nomes.length === 3, 'duas imagens recusadas'); }
+  catch (e) { ok(e.codigo === 'VARIAS_IMAGENS' && e.nomes.length === 2, 'duas imagens recusadas'); }
 
   // 1b. SYSTEM.CNF num disco sintético
   let r0 = await N.conferirJogo(discoSintetico('BOOT = cdrom:\\TEKKEN3\\SLUS_004.02;1\r\nTCB = 4\r\n'));
