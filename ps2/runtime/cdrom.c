@@ -2,6 +2,7 @@
 #include "cdrom.h"
 #include "io.h"
 #include "ram.h"
+#include "som.h"     /* V47: música XA */
 
 #include <stdio.h>
 #include <string.h>
@@ -9,10 +10,10 @@
 /* ---------------- disco ---------------- */
 
 #define SETOR      2352u
-#define T1_SETORES 268934u      /* faixa 1 (dados), tamanho do .bin / 2352 */
-#define T2_INICIO  (T1_SETORES + 150u)            /* INDEX 01 da faixa 2 */
-#define T3_INICIO  (T1_SETORES + 11778u + 150u)   /* INDEX 01 da faixa 3 */
-#define LEADOUT    (T1_SETORES + 11778u + 11923u)
+#define T1_SETORES PS2_CD_T1_SETORES                     /* faixa 1 (dados) */
+#define T2_INICIO  (T1_SETORES + 150u)                     /* INDEX 01 da faixa 2 */
+#define T3_INICIO  (T1_SETORES + PS2_CD_T2_SETORES + 150u) /* INDEX 01 da faixa 3 */
+#define LEADOUT    (T1_SETORES + PS2_CD_T2_SETORES + PS2_CD_T3_SETORES)
 
 static FILE *disco;
 
@@ -38,9 +39,6 @@ extern int  fileXioWaitAsync(int mode, int *retVal);
 #define FXIO_COMPLETE 1
 #include "kit/armazenamento.h"
 static int fx_fd = -1;
-static uint32_t cd_relogio(void) { uint32_t c; __asm__ volatile("mfc0 %0, $9" : "=r"(c)); return c; }
-#else
-static __attribute__((unused)) uint32_t cd_relogio(void) { return 0; }
 #endif
 
 #define CACHE_SETORES 32u
@@ -52,10 +50,6 @@ static int      pend;                                  /* leitura em andamento n
 static int      pend_feita, pend_bytes;                /* resultado já colhido */
 static uint32_t pend_ini;
 static uint32_t pos_arquivo = 0xFFFFFFFFu;             /* próximo setor do arquivo */
-unsigned long g_ps2_cd_leituras_arquivo, g_ps2_cd_seeks, g_ps2_cd_bfrd_atrasado;
-unsigned long g_ps2_cd_antecipadas, g_ps2_cd_prontas, g_ps2_cd_faltas;
-unsigned long long g_ps2_cd_espera;                    /* ciclos do EE esperando o arquivo */
-uint32_t g_ps2_cd_espera_max;
 
 static int arq_aberto(void)
 {
@@ -67,7 +61,6 @@ static int arq_aberto(void)
 
 static int arq_seek(uint32_t lba)
 {
-    g_ps2_cd_seeks++;
 #ifdef _EE
     if (fx_fd >= 0)
         return fileXioLseek(fx_fd, (int)(lba * SETOR), SEEK_SET) == (int)(lba * SETOR);
@@ -78,8 +71,6 @@ static int arq_seek(uint32_t lba)
 /* começa a ler 'bytes' para buf (no stdio já termina aqui) */
 static void arq_iniciar(void *buf, int bytes)
 {
-    g_ps2_cd_leituras_arquivo++;
-    { extern void ps2_diag(unsigned, uint32_t); ps2_diag(23u, (uint32_t)bytes); }   /* V43 */
     pend = 1; pend_feita = 0;
 #ifdef _EE
     if (fx_fd >= 0) {
@@ -100,15 +91,10 @@ static int arq_colher(int esperar)
 #ifdef _EE
     if (fx_fd >= 0) {
         int r = 0, c;
-        uint32_t t0 = cd_relogio(), dt;
         fileXioSetBlockMode(FXIO_NOWAIT);
         if (esperar) { fileXioWaitAsync(FXIO_WAIT, &r); c = FXIO_COMPLETE; }
         else c = fileXioWaitAsync(FXIO_NOWAIT, &r);
         fileXioSetBlockMode(FXIO_WAIT);
-        dt = cd_relogio() - t0;
-        if (esperar) { extern void ps2_diag(unsigned, uint32_t); ps2_diag(24u, dt / 295u); }   /* V43 */
-        g_ps2_cd_espera += dt;
-        if (dt > g_ps2_cd_espera_max) g_ps2_cd_espera_max = dt;
         if (c != FXIO_COMPLETE) return 0;
         pend_bytes = r < 0 ? 0 : r;
         pend_feita = 1;
@@ -119,16 +105,8 @@ static int arq_colher(int esperar)
     return 1;
 }
 
-/* Outras chamadas ao fileXio (gravação do log) sobrescrevem o resultado da
- * leitura assíncrona: o log do kit chama isto antes (main.c registra). */
-void ps2_cdrom_io_barreira(void)
-{
-    if (pend) arq_colher(1);
-}
-
-/* 1 se não há leitura do CD em andamento no fileXio (sem esperar). O log usa
- * isto para gravar só nesses momentos: antes a barreira parava o jogo até
- * ~140 ms a cada gravação (V12). */
+/* 1 se não há leitura do CD em andamento no fileXio (sem esperar): o CD-DA
+ * (som.c) lê a faixa 2 só nesses momentos (o fileXio faz um pedido por vez). */
 int ps2_cdrom_io_livre(void)
 {
     return !pend || pend_feita || arq_colher(0);
@@ -143,7 +121,6 @@ static void antecipar(void)
     if (n > CACHE_SETORES) n = CACHE_SETORES;
     pend_ini = prox;
     pos_arquivo = prox + n;
-    g_ps2_cd_antecipadas++;
     arq_iniciar(blocos[atual ^ 1u], (int)(n * SETOR));
 }
 
@@ -173,18 +150,21 @@ int ps2_cdrom_abrir(const char *pasta)
                 if (fd >= 0 && fx_fd < 0) close(fd);     /* não vaza o descritor */
             }
             if (fx_fd < 0) fx_fd = -1;
-            else { printf("cdrom: disco aberto (fileXio, leitura assincrona): %s\n", caminho); break; }
+            else { break; }
             continue;
         }
 #endif
         disco = fopen(caminho, "rb");
-        if (disco) printf("cdrom: disco aberto: %s\n", caminho);
     }
-    if (!arq_aberto()) {
-        disco = fopen("mass:/TEKKEN3/TEKKEN3.BIN", "rb");
-        if (disco) printf("cdrom: disco aberto: mass:/TEKKEN3/TEKKEN3.BIN\n");
+    {
+        const char *achou = arq_aberto() ? pasta : NULL;   /* pasta que abriu o disco */
+        if (!arq_aberto()) {
+            disco = fopen("mass:/TEKKEN3/TEKKEN3.BIN", "rb");
+            if (disco) { achou = "mass:/TEKKEN3/"; }
+        }
+        /* V59: a faixa de áudio abre agora, com o fileXio sem pedido em andamento */
+        if (arq_aberto()) ps2_som_cdda_abrir(achou);
     }
-    if (!arq_aberto()) printf("cdrom: AVISO: imagem do disco nao encontrada\n");
     cache_invalidar();
     return arq_aberto();
 }
@@ -198,8 +178,7 @@ static int ler_setor(uint32_t lba, uint8_t *buf)
     if (lba - cache_ini >= cache_n) {
         if (pend && lba - pend_ini < CACHE_SETORES) {
             /* próximo bloco já pedido: usa (só espera se ainda não chegou) */
-            if (pend_feita || arq_colher(0)) g_ps2_cd_prontas++;
-            else arq_colher(1);
+            arq_colher(1);
             pend = 0;
             atual ^= 1u;
             cache_ini = pend_ini;
@@ -208,7 +187,6 @@ static int ler_setor(uint32_t lba, uint8_t *buf)
         } else {
             /* fora da sequência: descarta a antecipação e lê agora */
             uint32_t n = T1_SETORES - lba;
-            g_ps2_cd_faltas++;
             if (pend) { arq_colher(1); pend = 0; }
             if (n > CACHE_SETORES) n = CACHE_SETORES;
             if (pos_arquivo != lba && !arq_seek(lba)) {
@@ -268,7 +246,9 @@ static void lba_para_msf(uint32_t lba, uint8_t *m, uint8_t *s, uint8_t *f)
 #define INT1 1u   /* dados prontos */
 #define INT2 2u   /* comando concluído (2ª resposta) */
 #define INT3 3u   /* 1ª resposta */
+#define INT4 4u   /* DataEnd (fim da faixa de áudio) */
 #define INT5 5u   /* erro */
+#define MODO_AUTOPAUSE 0x02u
 
 #define CICLOS_1A_RESP   50000u
 #define CICLOS_SETOR_1X  451584u   /* 33.868.800 / 75 */
@@ -299,6 +279,7 @@ static int      setor_pedido;               /* jogo já pediu os dados (BFRD)? *
 static int      bfrd_pendente;
 static void preparar_fifo(void);
 static uint32_t setor_quando;               /* quando o último setor foi lido */
+static uint32_t ultima_leitura;             /* V48: última leitura física (dado ou XA) */
 static uint8_t  fifo[SETOR];
 static uint32_t fifo_n, fifo_pos;
 static uint32_t agora;                      /* ciclos PS1 (última atualização) */
@@ -317,6 +298,7 @@ void ps2_cdrom_reset(void)
     alvo_lba = atual_lba = 0;
     setloc_pendente = lendo = ocupado = 0;
     fifo_n = fifo_pos = 0; setor_ok = 0; setor_pedido = 0; bfrd_pendente = 0;
+    ultima_leitura = agora - CICLOS_SETOR_1X;   /* a 1ª leitura não espera */
 }
 
 static void agendar(uint32_t atraso, uint8_t tipo, const uint8_t *r, uint8_t n)
@@ -333,6 +315,15 @@ static void agendar(uint32_t atraso, uint8_t tipo, const uint8_t *r, uint8_t n)
 static void agendar_stat(uint32_t atraso, uint8_t tipo)
 {
     agendar(atraso, tipo, &stat, 1);
+}
+
+/* V59: ver cdrom.h. Como o controlador do PS1: o motor para de tocar e, no
+ * fim normal com Autopause, vem DataEnd. */
+void ps2_cdrom_cdda_fim(int normal)
+{
+    if (stat & STAT_PLAY) atual_lba = ps2_som_cdda_lba();
+    stat &= (uint8_t)~STAT_PLAY;
+    if (normal && (modo & MODO_AUTOPAUSE)) agendar_stat(CICLOS_1A_RESP, INT4);
 }
 
 static void remover_int1(void)
@@ -360,18 +351,10 @@ static void comecar_leitura(void)
     prox_setor = agora + periodo_setor() + CICLOS_1A_RESP;
 }
 
-static unsigned n_trace;      /* registra os primeiros comandos no log */
-
 static void comando(uint8_t cmd)
 {
     uint8_t r[8];
     uint32_t t;
-
-    if (n_trace < 400u) {
-        n_trace++;
-        printf("cdrom: cmd %02X params=%u [%02X %02X %02X] ie=%02X\n", cmd,
-               n_param, param[0], param[1], param[2], ie);
-    }
 
     ocupado = 1;
     switch (cmd) {
@@ -384,13 +367,21 @@ static void comando(uint8_t cmd)
         setloc_pendente = 1;
         agendar_stat(CICLOS_1A_RESP, INT3);
         break;
-    case 0x03:                                    /* Play (CDDA): ainda mudo */
+    case 0x03:                                    /* Play (CDDA): som.c toca a faixa (V59) */
         if (setloc_pendente) { atual_lba = alvo_lba; setloc_pendente = 0; }
+        if (n_param >= 1u && param[0]) {          /* Play com a faixa (BCD): começo dela */
+            uint8_t f = bcd2bin(param[0]);
+            atual_lba = f == 2u ? T2_INICIO : f == 3u ? T3_INICIO : 0u;
+        }
         lendo = 0; remover_int1();
         stat = (uint8_t)((stat | STAT_PLAY) & ~STAT_READ);
         agendar_stat(CICLOS_1A_RESP, INT3);
+        /* depois da resposta: se não há o que tocar, som.c avisa o fim já
+         * (ps2_cdrom_cdda_fim tira o STAT_PLAY; o INT4 vem depois do INT3) */
+        ps2_som_cd_cmd(cmd, param, atual_lba);
         break;
     case 0x06: case 0x1B:                         /* ReadN / ReadS */
+        ps2_som_cd_cmd(cmd, param, 0);            /* V59: para o CD-DA */
         agendar_stat(CICLOS_1A_RESP, INT3);
         comecar_leitura();
         break;
@@ -400,12 +391,16 @@ static void comando(uint8_t cmd)
         agendar_stat(CICLOS_1A_RESP * 4u, INT2);
         break;
     case 0x08:                                    /* Stop */
+        if (stat & STAT_PLAY) atual_lba = ps2_som_cdda_lba();   /* V59: onde parou */
+        ps2_som_cd_cmd(cmd, param, 0);            /* V59: para o CD-DA */
         lendo = 0; remover_int1();
         agendar_stat(CICLOS_1A_RESP, INT3);
         stat = 0;
         agendar_stat(CICLOS_1A_RESP * 4u, INT2);
         break;
     case 0x09:                                    /* Pause */
+        if (stat & STAT_PLAY) atual_lba = ps2_som_cdda_lba();   /* V59: Play retoma daqui */
+        ps2_som_cd_cmd(cmd, param, 0);            /* V59: para o CD-DA */
         agendar_stat(CICLOS_1A_RESP, INT3);
         lendo = 0; remover_int1();
         stat &= (uint8_t)~(STAT_READ | STAT_PLAY | STAT_SEEK);
@@ -414,16 +409,19 @@ static void comando(uint8_t cmd)
     case 0x0A: case 0x1C:                         /* Init / Reset */
         lendo = 0; remover_int1();
         modo = 0;
+        ps2_som_cd_cmd(cmd, param, 0);
         stat = STAT_MOTOR;
         agendar_stat(CICLOS_1A_RESP, INT3);
         if (cmd == 0x0A) agendar_stat(CICLOS_1A_RESP * 8u, INT2);
         break;
     case 0x0B: case 0x0C: case 0x0D: case 0x12:   /* Mute/Demute/Setfilter/SetSession */
+        if (cmd != 0x12) ps2_som_cd_cmd(cmd, param, 0);   /* V47: mudo e filtro do XA */
         agendar_stat(CICLOS_1A_RESP, INT3);
         if (cmd == 0x12) agendar_stat(CICLOS_1A_RESP * 4u, INT2);
         break;
     case 0x0E:                                    /* Setmode */
         modo = param[0];
+        ps2_som_cd_cmd(cmd, param, 0);
         agendar_stat(CICLOS_1A_RESP, INT3);
         break;
     case 0x0F:                                    /* Getparam */
@@ -434,11 +432,15 @@ static void comando(uint8_t cmd)
         agendar(CICLOS_1A_RESP, INT3, setor + 12, 8);
         break;
     case 0x11: {                                  /* GetlocP */
-        uint32_t trilha = 1, ini = 0, rel;
-        if (atual_lba >= T3_INICIO) { trilha = 3; ini = T3_INICIO; }
-        else if (atual_lba >= T2_INICIO) { trilha = 2; ini = T2_INICIO; }
-        rel = atual_lba - ini;
-        r[0] = bin2bcd(trilha); r[1] = 1;
+        uint32_t trilha = 1, ini = 0, rel, indice = 1;
+        if (stat & STAT_PLAY) atual_lba = ps2_som_cdda_lba();   /* V59: onde o CD-DA está */
+        /* faixa pelo INDEX 00 (o pregap de 2 s é da faixa seguinte); no
+         * pregap, índice 0 e o tempo contando até o INDEX 01 */
+        if (atual_lba >= T3_INICIO - 150u) { trilha = 3; ini = T3_INICIO; }
+        else if (atual_lba >= T2_INICIO - 150u) { trilha = 2; ini = T2_INICIO; }
+        if (atual_lba < ini) { indice = 0; rel = ini - atual_lba; }
+        else rel = atual_lba - ini;
+        r[0] = bin2bcd(trilha); r[1] = (uint8_t)indice;
         r[2] = bin2bcd(rel / 4500u); r[3] = bin2bcd((rel / 75u) % 60u);
         r[4] = bin2bcd(rel % 75u);
         lba_para_msf(atual_lba, &r[5], &r[6], &r[7]);
@@ -457,6 +459,7 @@ static void comando(uint8_t cmd)
         agendar(CICLOS_1A_RESP, INT3, r, 3);
         break; }
     case 0x15: case 0x16:                         /* SeekL / SeekP */
+        ps2_som_cd_cmd(cmd, param, 0);            /* V59: para o CD-DA */
         if (setloc_pendente) { atual_lba = alvo_lba; setloc_pendente = 0; }
         lendo = 0; remover_int1();
         stat = (uint8_t)((stat | STAT_SEEK) & ~(STAT_READ | STAT_PLAY));
@@ -482,7 +485,6 @@ static void comando(uint8_t cmd)
         agendar_stat(CICLOS_1A_RESP * 20u, INT2);
         break;
     default:
-        printf("cdrom: comando %02X nao implementado\n", cmd);
         r[0] = (uint8_t)(stat | 1u); r[1] = 0x40;
         agendar(CICLOS_1A_RESP, INT5, r, 2);
         break;
@@ -508,28 +510,41 @@ void ps2_cdrom_update(uint32_t ciclos)
          * mais lento que um PS1), mas não para sempre: se o jogo ignorar um
          * setor (o hardware real simplesmente segue), após 8 períodos o
          * drive entrega o próximo. */
+        /* V48: na recuperação de atraso, no máximo 2x a cadência entre duas
+         * leituras quaisquer (um setor XA não muda setor_quando, e sem isto
+         * o setor seguinte saía na mesma conferência) */
         if (!tem_int1 && iflag == 0 &&
+            (uint32_t)(agora - ultima_leitura) >= periodo_setor() / 2u &&
             (!setor_ok ||
              (setor_pedido && (uint32_t)(agora - setor_quando) >= periodo_setor() / 2u) ||
              (!setor_pedido && (uint32_t)(agora - setor_quando) >= 8u * periodo_setor()))) {
             prox_setor += periodo_setor();
-            if ((int32_t)(agora - prox_setor) >= 0) prox_setor = agora + periodo_setor();
+            /* V48: se o jogo demorou a atender (o drive esperou), recupera o
+             * atraso: o próximo setor sai assim que o jogo pedir este (no
+             * máximo 2x mais rápido, pela regra do meio período acima). Antes
+             * o horário recomeçava do "agora" e cada demora era perdida de
+             * vez: no vídeo da abertura o CD (vídeo e música juntos) andava
+             * a ~92% do PS1 nos trechos pesados e o som falhava. Mais de 8
+             * setores de atraso (pausa longa): recomeça do agora. */
+            if ((int32_t)(agora - prox_setor) >= (int32_t)(8u * periodo_setor()))
+                prox_setor = agora + periodo_setor();
             {
                 static uint8_t novo[SETOR];
                 if (!ler_setor(atual_lba, novo) && atual_lba < T1_SETORES) {
                     uint8_t r[2];
-                    printf("cdrom: ERRO lendo setor %lu da imagem\n", (unsigned long)atual_lba);
                     r[0] = (uint8_t)(stat | 1u); r[1] = 0x04;      /* erro de leitura */
                     lendo = 0;
                     agendar(0, INT5, r, 2);
                     return;
                 }
                 atual_lba++;
+                ultima_leitura = agora;
                 /* setor de áudio XA (submode bit2) com XA ligado: vai para o
                  * SPU (ainda mudo). NÃO substitui o setor de dados pendente:
                  * no console o jogo é mais lento e pede os dados depois que o
                  * próximo setor (XA da música) já passou; antes o XA apagava
                  * o dado e o libcd esperava para sempre (luta travada). */
+                if (novo[18] & 0x04u) ps2_som_xa(novo, (modo & 0x40u) != 0);   /* V47 */
                 if ((modo & 0x40u) && (novo[18] & 0x04u)) {
                     if (!setor_ok) setor_quando = agora;
                 } else {
@@ -543,7 +558,6 @@ void ps2_cdrom_update(uint32_t ciclos)
                     if (bfrd_pendente && fifo_pos >= fifo_n) {
                         bfrd_pendente = 0;
                         preparar_fifo();
-                        g_ps2_cd_bfrd_atrasado++;
                     }
                 }
             }
@@ -561,10 +575,6 @@ void ps2_cdrom_update(uint32_t ciclos)
         if (e.tipo == INT3) ocupado = 0;
         if (iflag & ie & 0x1Fu)
             ps2_irq_raise(IRQ_CDROM);
-        if (n_trace < 400u && e.tipo != INT1) {
-            n_trace++;
-            printf("cdrom: INT%u resp=%02X (n=%u) ie=%02X\n", e.tipo, e.resp[0], e.n, ie);
-        }
     }
 }
 
@@ -639,19 +649,6 @@ void ps2_cdrom_write(uint32_t reg, uint8_t v)
 void ps2_cdrom_dma(uint32_t madr, uint32_t palavras)
 {
     uint32_t a = madr & 0x1FFFFCu, i;
-    static unsigned n_dbg;
-    static uint32_t ultimo_lba = 0xFFFFFFFFu, ultimo_fim;
-    /* registra sequências contíguas: "lba X..Y -> RAM A..B" */
-    if (setor_lba != ultimo_lba + 1u || madr != ultimo_fim) {
-        if (n_dbg < 400u) {
-            n_dbg++;
-            printf("cdrom: dma lba %lu -> %08lx (%lu palavras, modo %02X)\n",
-                   (unsigned long)setor_lba, (unsigned long)madr,
-                   (unsigned long)palavras, modo);
-        }
-    }
-    ultimo_lba = setor_lba;
-    ultimo_fim = madr + palavras * 4u;
     for (i = 0; i < palavras; i++) {
         uint32_t w = 0, k;
         for (k = 0; k < 4u; k++)

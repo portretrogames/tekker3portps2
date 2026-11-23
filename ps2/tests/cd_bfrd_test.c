@@ -1,10 +1,22 @@
 /* Pedido BFRD x chegada de setores (base: reprodução do ChatGPT, V9).
  * Setores sintéticos, sem dados do jogo. Agora exige PROGRESSO. */
 #include <assert.h>
+#include <stdio.h>
+/* conta as leituras e os posicionamentos do arquivo da imagem (o runtime não
+ * conta: só o teste quer saber) */
+static unsigned long n_fread, n_fseek;
+static size_t fread_contado(void *p, size_t t, size_t n, FILE *f) { n_fread++; return fread(p, t, n, f); }
+static int fseek_contado(FILE *f, long o, int w) { n_fseek++; return fseek(f, o, w); }
+#define fread fread_contado
+#define fseek fseek_contado
 #include "../runtime/cdrom.c"
-uint8_t g_ps1_ram[PS2_RAM_SIZE];
+#undef fread
+#undef fseek
+uint8_t g_ps2_janela[PS2_JANELA_TAM];
 uint32_t g_cod_ini, g_cod_tam;
 uint8_t g_cod_sujo[4096];
+uint8_t g_cod_pag[PS2_RAM_SIZE >> PS2_COD_PAG_BITS];
+void ps2_cod_marcar_lento(uint32_t addr) { (void)addr; }
 void ps2_irq_raise(unsigned bit) { (void)bit; }
 
 static FILE *disco_sintetico(const uint8_t *marcas, const uint8_t *xa, unsigned n)
@@ -71,7 +83,7 @@ int main(void)
         for (i = 0; i < 40; i++) m[i] = (uint8_t)(0x40 + i);
         disco = disco_sintetico(m, x, 40);
         ps2_cdrom_reset(); agora = 0; comecar_leitura();
-        g_ps2_cd_leituras_arquivo = g_ps2_cd_seeks = 0;
+        n_fread = n_fseek = 0;
         for (i = 0; i < 40; i++) {
             ps2_cdrom_update(prox_setor);
             assert(iflag == INT1 && setor_lba == i);
@@ -80,7 +92,7 @@ int main(void)
             ps2_cdrom_write(0, 1); ps2_cdrom_write(3, 0x1F); ps2_cdrom_write(0, 0);
             ps2_cdrom_write(3, 0x00);
         }
-        assert(g_ps2_cd_leituras_arquivo == 2 && g_ps2_cd_seeks == 1);
+        assert(n_fread == 2 && n_fseek == 1);
         fclose(disco);
     }
     puts("cd_bfrd_test: OK");

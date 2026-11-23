@@ -2,9 +2,8 @@
  * memory.c — caminho "lento" da memória do PS1: RAM (para quem não usa o
  * inline), scratchpad de 1 KB e I/O.
  *
- * Endereços ainda não implementados (BIOS, GPU, SPU, CD, DMA, timers...)
- * PARAM a execução e mostram o endereço. É de propósito: na Fase 2 o log
- * diz qual hardware o jogo pede primeiro.
+ * Endereço que não é RAM, scratchpad, E/S nem o controle de cache PARA a
+ * execução (abort): o jogo nunca deveria chegar lá.
  */
 #include "memory.h"
 #include "ram.h"
@@ -18,22 +17,18 @@
 #error "O runtime PS2 nao usa contagem de ciclos (PSX_ENABLE_BLOCK_CYCLES)"
 #endif
 
-#include "prof.h"
-unsigned long g_prof_scratch_n, g_prof_io_n;
+/* Acessos à RAM que chegam aqui são raros: o código gerado só manda KUSEG/KSEG1;
+ * KSEG0 é resolvido em linha em fast_memory.h. */
 #define SCRATCHPAD_BASE 0x1F800000u
 #define SCRATCHPAD_SIZE 1024u
 
-/* não é static: fast_memory.h acessa direto no código gerado */
-uint8_t g_ps2_scratchpad[SCRATCHPAD_SIZE] __attribute__((aligned(16)));
+/* V56: definido em ram.c, dentro da janela da RAM (ram.h) */
 #define scratchpad g_ps2_scratchpad
 
 static void memory_unimplemented(uint32_t address, unsigned width, int write,
                                  uint32_t value)
 {
-    printf("PS2 memory: %s %u bits em 0x%08lX (valor 0x%08lX) nao implementado\n",
-           write ? "escrita" : "leitura", width * 8u,
-           (unsigned long)address, (unsigned long)value);
-    fflush(stdout);
+    (void)address; (void)width; (void)write; (void)value;
     abort();
 }
 
@@ -58,11 +53,10 @@ static int scratchpad_hit(uint32_t address, uint32_t *offset)
 void ps2_memory_init(CPUState *cpu)
 {
     if (cpu == NULL) {
-        printf("PS2 memory: CPUState nulo\n");
         abort();
     }
     ps2_ram_clear();
-    memset(scratchpad, 0, sizeof(scratchpad));
+    memset(scratchpad, 0, SCRATCHPAD_SIZE);
     ps2_io_init();
     cache_ctrl = 0;
     cpu->read_byte = psx_read_byte;
@@ -76,10 +70,11 @@ void ps2_memory_init(CPUState *cpu)
 uint8_t psx_read_byte(uint32_t address)
 {
     uint32_t off;
-    if (ps2_ram_hit(address))
+    if (ps2_ram_hit(address)) {
         return ps2_ram_get8(address);
-    if (scratchpad_hit(address, &off)) { g_prof_scratch_n++; return scratchpad[off]; }
-    if (ps2_io_hit(address) && (++g_prof_io_n, 1))
+    }
+    if (scratchpad_hit(address, &off)) { return scratchpad[off]; }
+    if (ps2_io_hit(address))
         return (uint8_t)ps2_io_read(address, 1u);
     if (address == CACHE_CTRL)
         return (uint8_t)cache_ctrl;
@@ -90,10 +85,11 @@ uint8_t psx_read_byte(uint32_t address)
 uint16_t psx_read_half(uint32_t address)
 {
     uint32_t off;
-    if (ps2_ram_hit(address))
+    if (ps2_ram_hit(address)) {
         return ps2_ram_get16(address);
-    if (scratchpad_hit(address, &off)) { g_prof_scratch_n++; return *(const ps2_u16a *)&scratchpad[off & ~1u]; }
-    if (ps2_io_hit(address) && (++g_prof_io_n, 1))
+    }
+    if (scratchpad_hit(address, &off)) { return *(const ps2_u16a *)&scratchpad[off & ~1u]; }
+    if (ps2_io_hit(address))
         return (uint16_t)ps2_io_read(address, 2u);
     if (address == CACHE_CTRL)
         return (uint16_t)cache_ctrl;
@@ -104,10 +100,11 @@ uint16_t psx_read_half(uint32_t address)
 uint32_t psx_read_word(uint32_t address)
 {
     uint32_t off;
-    if (ps2_ram_hit(address))
+    if (ps2_ram_hit(address)) {
         return ps2_ram_get32(address);
-    if (scratchpad_hit(address, &off)) { g_prof_scratch_n++; return *(const ps2_u32a *)&scratchpad[off & ~3u]; }
-    if (ps2_io_hit(address) && (++g_prof_io_n, 1))
+    }
+    if (scratchpad_hit(address, &off)) { return *(const ps2_u32a *)&scratchpad[off & ~3u]; }
+    if (ps2_io_hit(address))
         return ps2_io_read(address, 4u);
     if (address == CACHE_CTRL)
         return cache_ctrl;
@@ -120,7 +117,7 @@ void psx_write_byte(uint32_t address, uint8_t value)
     uint32_t off;
     if (ps2_ram_hit(address)) { ps2_ram_set8(address, value); return; }
     if (scratchpad_hit(address, &off)) { scratchpad[off] = value; return; }
-    if (ps2_io_hit(address) && (++g_prof_io_n, 1)) { ps2_io_write(address, value, 1u); return; }
+    if (ps2_io_hit(address)) { ps2_io_write(address, value, 1u); return; }
     if (address == CACHE_CTRL) { cache_ctrl = value; return; }
     memory_unimplemented(address, 1u, 1, value);
 }
@@ -133,7 +130,7 @@ void psx_write_half(uint32_t address, uint16_t value)
         *(ps2_u16a *)&scratchpad[off & ~1u] = value;
         return;
     }
-    if (ps2_io_hit(address) && (++g_prof_io_n, 1)) { ps2_io_write(address, value, 2u); return; }
+    if (ps2_io_hit(address)) { ps2_io_write(address, value, 2u); return; }
     if (address == CACHE_CTRL) { cache_ctrl = value; return; }
     memory_unimplemented(address, 2u, 1, value);
 }
@@ -146,7 +143,7 @@ void psx_write_word(uint32_t address, uint32_t value)
         *(ps2_u32a *)&scratchpad[off & ~3u] = value;
         return;
     }
-    if (ps2_io_hit(address) && (++g_prof_io_n, 1)) { ps2_io_write(address, value, 4u); return; }
+    if (ps2_io_hit(address)) { ps2_io_write(address, value, 4u); return; }
     if (address == CACHE_CTRL) { cache_ctrl = value; return; }
     memory_unimplemented(address, 4u, 1, value);
 }

@@ -13,7 +13,7 @@ gerado/ nunca é editado; só a cópia compilada muda.
    Também vale para SLUS_004.02_decls.h (psx_swl/psx_swr), copiado para
    build/r/ — o #include "..." dos shards acha a cópia primeiro.
 """
-import re, sys
+import os, re, sys
 
 ent, sai = sys.argv[1], sys.argv[2]
 s = open(ent, encoding='utf-8').read()
@@ -34,45 +34,50 @@ if re.search(r'cpu->(read|write)_(word|half|byte)\b', s):
     sys.exit('transformar_gerado: acesso de memoria por ponteiro que nao foi trocado')
 s = re.sub(r'^(void func_[0-9A-Fa-f_]+)\(CPUState\* cpu\)', r'\1(CPUState* restrict cpu)', s, flags=re.M)
 
+# V56: acessos relativos ao sp (gpr[29]) vão direto pela janela RAM+scratchpad
+# (runtime/janela.h): sem o teste de região e sem a marcação de código sujo.
+# A pilha do jogo fica sempre na RAM (ou no scratchpad) e nunca em cima de
+# código. Com GEN_OPT="-O2 -DPS2_JANELA_VERIFICAR=1" cada acesso é conferido.
+_BITS = {'word': '32', 'half': '16', 'byte': '8'}
+s, _n_pw = re.subn(r'ps2_fast_write_(word|half|byte)\(cpu->gpr\[29\](?: \+ (-?\d+))?, ',
+                   lambda m: 'ps2_pil_wr%s(cpu->gpr[29], %s, ' % (_BITS[m.group(1)], m.group(2) or '0'), s)
+s, _n_pr = re.subn(r'psx_cyc_load_(word|half|byte)\(cpu, cpu->gpr\[29\](?: \+ (-?\d+))?, \d+, 0x[0-9A-Fa-f]+u\)',
+                   lambda m: 'ps2_pil_rd%s(cpu->gpr[29], %s)' % (_BITS[m.group(1)], m.group(2) or '0'), s)
+
 # 7. Rotinas nativas (V26, tools/nativo.py + runtime/nativo_ganchos.c): na
 # entrada normal (cpu->pc == 0) a função chama a versão nativa.
 import os
 _lista = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'nativas.txt')
 NATIVAS = [l.split('#')[0].strip().split(':')[0] for l in open(_lista)
            if l.split('#')[0].strip()]
-# V32: conta as atualizações da lógica da luta (entrada de 8002AE58)
-cab = 'void func_8002AE58(CPUState* restrict cpu)\n{\n'
-if cab in s:
-    s = s.replace(cab, cab + '    { extern unsigned long g_ps2_luta_atualiz; if (cpu->pc == 0u) g_ps2_luta_atualiz++; }\n', 1)
 for a in NATIVAS:
     cab = 'void func_%s(CPUState* restrict cpu)\n{\n' % a
     if cab in s:
         s = s.replace(cab, cab + '''    { extern int ps2_nat_%s_gancho(CPUState *cpu);
       if (cpu->pc == 0u && ps2_nat_%s_gancho(cpu)) return; }
 ''' % (a, a), 1)
-# V37: entrada da espera do quadro (800296C4): mede o período entre quadros
-# (1 VBlank = ok; 2+ = o quadro perdeu o VBlank). runtime/nativo_ganchos.c
-cab = 'void func_800296C4(CPUState* restrict cpu)\n{\n'
-if cab in s:
-    s = s.replace(cab, cab + '    { extern void ps2_quadro_espera(void); if (cpu->pc == 0u) ps2_quadro_espera(); }\n', 1)
 
-# V41: diagnóstico — entrada da lógica da luta (8002AE58) e fim da espera do
-# quadro (8006B6FC é a 1ª chamada depois de 800296C4 no laço principal 80028BA0)
-# V42: + 800295F4 (teste "contador do timer 2 >= 2" que libera o passo de
-# recuperação da lógica)
-for _f, _g in (('8002AE58', 'ps2_diag_luta'), ('8006B6FC', 'ps2_diag_espera_fim'),
-               ('800295F4', 'ps2_diag_recupera')):
-    cab = 'void func_%s(CPUState* restrict cpu)\n{\n' % _f
-    if cab in s:
-        s = s.replace(cab, cab + '    { extern void %s(void); if (cpu->pc == 0u) %s(); }\n' % (_g, _g), 1)
-
-# V36: o port ainda não tem som. O tick do sequenciador de som do jogo
-# (80088BA8, chamado na IRQ do timer 2) era ~18% do EE ("quente 80088c00")
-# calculando notas/volumes para nada. Com PS2_SOM_PULAR=1 (padrão,
-# runtime/nativo_ganchos.c) a função volta na hora.
-cab = 'void func_80088BA8(CPUState* restrict cpu)\n{\n'
+# V48: VSync() da libetc espera o VBlank em v_wait(alvo, tempo) (80085B20), que
+# desiste depois de tempo<<15 voltas e escreve "VSync: timeout". No PS1 isso
+# passa de 16,7 ms; no código compilado a volta é bem mais rápida (~2,5 ms no
+# PCSX2) e o VSync(0) do tocador do vídeo da abertura desistia ~5 vezes por
+# segundo, antes do VBlank. Aqui o limite fica 8x maior (só na entrada normal;
+# o laço guarda o limite na pilha logo no começo). O VSync passa 0 ou 1 (ou
+# n-1 em VSync(n)); com o <<3 daqui e o <<15 do v_wait o tempo sobe 18 bits:
+# a partir de 0x2000 chegaria a 2^31 e o limite ficaria negativo, então de
+# 0x1000 para cima (com folga) fica como está.
+cab = 'void func_80085B20(CPUState* restrict cpu)\n{\n'
 if cab in s:
-    s = s.replace(cab, cab + '    { extern int ps2_som_pular(CPUState *cpu); if (cpu->pc == 0u && ps2_som_pular(cpu)) return; }\n', 1)
+    s = s.replace(cab, cab + '    if (cpu->pc == 0u && cpu->gpr[5] < 0x1000u) cpu->gpr[5] <<= 3;   /* V48: VSync sem timeout cedo */\n', 1)
+
+# V55: laço da luta 800508C4: o passo de recuperação (sem desenho) só roda se
+# a lógica 8002AE58 devolveu 1. runtime/nativo_ganchos.c libera a recuperação
+# também na apresentação do round (8002AE58 devolve 0).
+_ant = re.compile(r'^\s*int _bc_800508D0\s*=\s*\(cpu->gpr\[16\]\s*!=\s*cpu->gpr\[19\]\);', re.M)
+if 'block_800508D0:' in s:
+    s, _n = _ant.subn('    int _bc_800508D0; { extern int ps2_luta_sem_recup(CPUState *c); _bc_800508D0 = ps2_luta_sem_recup(cpu); }', s)
+    if not _n or re.search(r'int _bc_800508D0\s*=', s):
+        raise SystemExit('transformar_gerado: o teste do laço da luta (800508D0) não foi trocado em todas as cópias ')
 
 # 9. V33: "jal" com alvo constante vira chamada C direta. Se a função chamada
 # voltar normalmente (cpu->pc == endereço de retorno) e nenhum código foi
@@ -109,10 +114,10 @@ if not ent.endswith('_dispatch.c') and 'CPS jal ->' in s:
                 return m.group(0)
             n_jal += 1
             return ('{ if (__builtin_expect(g_ps2_ver_ok[%du] == g_cod_ver, 1)) { uint32_t _v = g_cod_ver; '
-                    'PS2_PROF_D_ENTRA(%du) cpu->pc = 0; func_%s(cpu); PS2_PROF_D_SAI '
+                    'cpu->pc = 0; func_%s(cpu); '
                     'if (cpu->pc == 0x%su && g_cod_ver == _v) { cpu->pc = 0; psx_check_interrupts_at(cpu, 0x%su); goto block_%s; } '
                     'return; } cpu->pc = 0x%su; return; }  /* V33 jal direto -> 0x%s */'
-                    % (_IDX[alvo], _IDX[alvo], alvo, r, r, r, alvo, alvo))
+                    % (_IDX[alvo], alvo, r, r, r, alvo, alvo))
         partes[pi] = re.sub(r'cpu->pc = 0x([0-9A-F]{8})u; return;  /\* CPS jal -> 0x[0-9A-F]{8} \*/', _troca, corpo)
     s = ''.join(partes)
     sys.stderr.write('transformar_gerado: %d jal diretos\n' % n_jal)
@@ -126,77 +131,17 @@ if ent.endswith('_dispatch.c'):
     fim = s.index('\n}\n', i) + 3
     cache = '''
 /* ps2: cache direto na frente da busca binária (tools/transformar_gerado.py) */
-unsigned long g_ps2_desp_buscas, g_ps2_desp_acertos;
 static const PsxGameDispatchEntry* psx_game_find_entry(uint32_t addr) {
     static struct { uint32_t addr; const PsxGameDispatchEntry* e; } cache[8192];
     uint32_t i = (addr >> 2) & 8191u;
     const PsxGameDispatchEntry* e;
-    if (cache[i].e && cache[i].addr == addr) { g_ps2_desp_acertos++; return cache[i].e; }
-    g_ps2_desp_buscas++;
+    if (cache[i].e && cache[i].addr == addr) return cache[i].e;
     e = psx_game_find_entry_busca(addr);
     if (e) { cache[i].addr = addr; cache[i].e = e; }
     return e;
 }
 '''
     s = s[:fim] + cache + s[fim:]
-
-    # 4. Perfil por função (V22): o tempo entre um despacho e o seguinte vai
-    # para a função despachada antes (inclui o laço e as chamadas da BIOS que
-    # ela fez; sobrevive ao longjmp das interrupções).
-    velho = '''    entry->fn(cpu);
-    return 1;
-}'''
-    if velho not in s:
-        sys.exit('transformar_gerado: chamada do despacho nao encontrada')
-    s = s.replace(velho, '''#ifdef _EE
-    {
-        uint32_t c;
-        __asm__ volatile("mfc0 %0, $9" : "=r"(c));
-        g_ps2_prof_fn[g_ps2_prof_ult] += c - g_ps2_prof_t;
-        g_ps2_prof_t = c;
-        g_ps2_prof_ult = (uint32_t)(entry - k_psx_game_dispatch);
-    }
-#endif
-    entry->fn(cpu);
-    return 1;
-}
-
-/* Imprime as funções que mais gastaram tempo desde a última chamada. */
-void ps2_prof_funcoes(void)
-{
-    enum { TOP = 16 };
-    uint32_t top_ad[TOP], top_c[TOP];
-    unsigned long long total = 0;
-    uint32_t i = 0, k;
-    for (k = 0; k < TOP; k++) { top_ad[k] = 0; top_c[k] = 0; }
-    while (i < PSX_GAME_DISPATCH_COUNT) {
-        /* entradas seguidas da mesma função (continuações) somam juntas */
-        void (*fn)(CPUState*) = k_psx_game_dispatch[i].fn;
-        uint32_t ad = k_psx_game_dispatch[i].addr, soma = 0;
-        while (i < PSX_GAME_DISPATCH_COUNT && k_psx_game_dispatch[i].fn == fn) {
-            soma += g_ps2_prof_fn[i]; g_ps2_prof_fn[i] = 0; i++;
-        }
-        total += soma;
-        for (k = 0; k < TOP; k++)
-            if (soma > top_c[k]) {
-                uint32_t j;
-                for (j = TOP - 1; j > k; j--) { top_c[j] = top_c[j - 1]; top_ad[j] = top_ad[j - 1]; }
-                top_c[k] = soma; top_ad[k] = ad;
-                break;
-            }
-    }
-    printf("funcoes (%% do tempo total, inclui GPU/GTE/IRQ feitos dentro delas; %llu Mciclos):", total / 1000000ull);
-    for (k = 0; k < TOP && top_c[k]; k++)
-        printf(" %08lx:%llu.%llu", (unsigned long)top_ad[k],
-               (unsigned long long)top_c[k] * 100ull / (total ? total : 1),
-               ((unsigned long long)top_c[k] * 1000ull / (total ? total : 1)) % 10ull);
-    printf("\\n");
-}''', 1)
-    s = s.replace('/* ps2: cache direto na frente da busca binária', '''/* ps2: perfil por função (V22) */
-#include <stdio.h>
-uint32_t g_ps2_prof_fn[PSX_GAME_DISPATCH_COUNT];   /* V39: globais (PS2_PROF_DIRETO) */
-uint32_t g_ps2_prof_t, g_ps2_prof_ult;
-/* ps2: cache direto na frente da busca binária''', 1)
 
     # 8. V31: despacho mais barato.
     #  - validade do código: cada entrada guarda a "versão" (g_cod_ver) em que
@@ -226,8 +171,57 @@ uint32_t g_ps2_prof_t, g_ps2_prof_ult;
     if velho not in s:
         sys.exit('transformar_gerado: vsync_query do despacho nao encontrado')
     s = s.replace(velho, "    /* (V31: psx_vsync_query_hle_try removido: no PS2 sempre 0) */", 1)
-    s = s.replace('/* ps2: perfil por função (V22) */', 'uint32_t g_ps2_ver_ok[PSX_GAME_DISPATCH_COUNT];   /* V31/V33 */\n/* ps2: perfil por função (V22) */', 1)
+    s = s.replace('/* ps2: cache direto na frente da busca binária', 'uint32_t g_ps2_ver_ok[PSX_GAME_DISPATCH_COUNT];   /* V31/V33 */\n/* ps2: cache direto na frente da busca binária', 1)
+    # V56: as faixas de código do despacho dizem quais páginas da RAM têm
+    # código compilado (ram.h: g_cod_pag)
+    s += '''
+/* ps2 (V56): páginas da RAM com código compilado (ver ram.h) */
+void ps2_despacho_paginas_de_codigo(void)
+{
+    extern void ps2_cod_so_codigo(const uint32_t *faixas, uint32_t n);
+    /* lida como pares {início, tamanho}, como dirty_ram_text_native_ok_ranges_from */
+    _Static_assert(sizeof(k_psx_game_code_ranges[0]) == 2u * sizeof(uint32_t), "faixa = {lo, len}");
+    ps2_cod_so_codigo(&k_psx_game_code_ranges[0].lo,
+                      (uint32_t)(sizeof(k_psx_game_code_ranges) / sizeof(k_psx_game_code_ranges[0])));
+}
+'''
     if '#include "fast_memory.h"' not in s:
-        s = s.replace('/* ps2: perfil por função (V22) */', '#include "fast_memory.h"\n/* ps2: perfil por função (V22) */', 1)
+        s = s.replace('uint32_t g_ps2_ver_ok[', '#include "fast_memory.h"\nuint32_t g_ps2_ver_ok[', 1)
+
+# V59: checagem de interrupção só nos desvios para TRÁS (laços) e nas
+# outras saídas (chamadas, saltos por registrador). Nos desvios para a
+# frente ela saía em ~82% dos desvios do jogo (~8 instruções cada, ~1,6 MB
+# de código): um trecho sem laço termina logo e a interrupção é vista no
+# próximo laço.
+if not ent.endswith('_dispatch.c') and not ent.endswith('_decls.h'):
+    linhas = s.split('\n')
+    bloco = None
+    tiradas = 0
+    chk = re.compile(r'psx_check_interrupts_at\(cpu, 0x([0-9A-Fa-f]{8})u\);\s*')
+    for i, l in enumerate(linhas):
+        m = re.match(r'\s*block_([0-9A-Fa-f]{8})\s*:', l)
+        if m:
+            bloco = int(m.group(1), 16)
+            continue
+        # começo de função (qualquer variação da assinatura): esquece o bloco
+        if re.match(r'\s*(?:static\s+)?(?:inline\s+)?void\s+\w+\s*\(\s*CPUState\s*\*', l):
+            bloco = None
+            continue
+        if bloco is None or 'psx_check_interrupts_at' not in l:
+            continue
+        def _tira(m, i=i, l=l):
+            global tiradas
+            alvo = m.group(1)
+            resto = l[m.end():]
+            prox = linhas[i + 1] if i + 1 < len(linhas) else ''
+            vai = resto.startswith('goto block_%s;' % alvo) or (not resto.strip() and prox.strip().startswith('goto block_%s;' % alvo))
+            # (alvo e rótulo com o mesmo texto: o gerador escreve os dois em maiúsculas)
+            if vai and int(alvo, 16) > bloco:
+                tiradas += 1
+                return ''
+            return m.group(0)
+        linhas[i] = chk.sub(_tira, l)
+    s = '\n'.join(linhas)
+    sys.stderr.write('transformar_gerado: %d checagens de interrupcao para a frente tiradas\n' % tiradas)
 
 open(sai, 'w', encoding='utf-8').write(s)

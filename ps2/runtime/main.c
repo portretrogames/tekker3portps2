@@ -8,8 +8,10 @@
  * 3. Inicia os registradores como a BIOS do PS1 faria (PC, GP, SP/FP).
  * 4. Entra no código recompilado pelo dispatch.
  *
- * A execução para com log quando encontra código ou hardware não suportado.
+ * A execução para quando encontra código ou hardware não suportado.
  */
+#include "abertura.h"
+#include "kit/som.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -18,6 +20,7 @@
 #include "cpu_state.h"
 #include "memory.h"
 #include "ram.h"
+#include "quente.h"
 #include "bios_hle.h"
 #include "cdrom.h"
 #include "interp.h"
@@ -29,11 +32,13 @@
 
 extern int psx_dispatch_game_compiled(CPUState *cpu, uint32_t addr);
 
-/* Global: o CPUState é grande e não deve ficar na pilha do EE. */
-CPUState g_ps2_cpu;
+/* Global: o CPUState é grande e não deve ficar na pilha do EE.
+ * V56: é um apelido para dentro do bloco quente de ram.c (ram.h: lugar fixo
+ * no cache de dados). */
+extern CPUState g_ps2_cpu;
+typedef char cpu_cabe_no_bloco[(PS2_CPU_NO_CACHE + sizeof(CPUState) <= PS2_COD_PAG_NO_CACHE) ? 1 : -1];
 
-/* Quantas vezes o laço de despacho rodou (diagnóstico). */
-static unsigned long g_despachos;
+#define despachar(cpu, alvo) psx_dispatch_game_compiled((cpu), (alvo))
 
 #define EXE_NOME        "SLUS_004.02"
 #define EXE_CABECALHO   2048u
@@ -77,12 +82,10 @@ static int carregar_exe(const char *caminho, PsxExeInfo *info)
     FILE *f = fopen(caminho, "rb");
 
     if (f == NULL) {
-        printf("loader: nao abriu %s\n", caminho);
         return 0;
     }
     if (fread(cab, 1, sizeof(cab), f) != sizeof(cab) ||
         memcmp(cab, "PS-X EXE", 8) != 0) {
-        printf("loader: %s nao e um PS-X EXE valido\n", caminho);
         fclose(f);
         return 0;
     }
@@ -95,14 +98,10 @@ static int carregar_exe(const char *caminho, PsxExeInfo *info)
 
     base = info->t_addr & PS2_RAM_MASK;
     if (!ps2_ram_hit(info->t_addr) || info->t_size > PS2_RAM_SIZE - base) {
-        printf("loader: destino invalido t_addr=%08lx t_size=%08lx\n",
-               (unsigned long)info->t_addr, (unsigned long)info->t_size);
         fclose(f);
         return 0;
     }
     if (fread(ps2_ram_data() + base, 1, info->t_size, f) != info->t_size) {
-        printf("loader: arquivo curto (esperado %lu bytes)\n",
-               (unsigned long)info->t_size);
         fclose(f);
         return 0;
     }
@@ -110,10 +109,8 @@ static int carregar_exe(const char *caminho, PsxExeInfo *info)
     {
         extern void ps2_cod_registrar(uint32_t endereco, uint32_t tamanho);
         ps2_cod_registrar(info->t_addr, info->t_size);
+        { extern void ps2_despacho_paginas_de_codigo(void); ps2_despacho_paginas_de_codigo(); }
     }
-    printf("loader: %s carregado: %lu bytes em %08lx, PC=%08lx\n", caminho,
-           (unsigned long)info->t_size, (unsigned long)info->t_addr,
-           (unsigned long)info->pc0);
     return 1;
 }
 
@@ -158,7 +155,6 @@ static int carregar_exe_do_disco(PsxExeInfo *info)
     uint8_t *dst;
     const char *p;
     if (!ps2_cdrom_ler_dados(16, setor) || memcmp(setor + 1, "CD001", 5) != 0) {
-        printf("loader: disco sem ISO9660\n");
         return 0;
     }
     dir_lba = le32(setor + 156 + 2);
@@ -180,7 +176,6 @@ static int carregar_exe_do_disco(PsxExeInfo *info)
         }
     }
     if (!boot[0]) strcpy(boot, EXE_NOME);
-    printf("loader: executavel do disco: %s\n", boot);
     /* percorre as pastas */
     p = boot;
     lba = 0;
@@ -192,7 +187,7 @@ static int carregar_exe_do_disco(PsxExeInfo *info)
         dir_lba = lba; dir_tam = tam;
         p = fim + 1;
     }
-    if (!lba) { printf("loader: %s nao esta no disco\n", boot); return 0; }
+    if (!lba) { return 0; }
     if (!ps2_cdrom_ler_dados(lba, setor) || memcmp(setor, "PS-X EXE", 8) != 0) return 0;
     info->pc0    = le32(setor + 0x10);
     info->gp0    = le32(setor + 0x14);
@@ -214,21 +209,11 @@ static int carregar_exe_do_disco(PsxExeInfo *info)
     {
         extern void ps2_cod_registrar(uint32_t endereco, uint32_t tamanho);
         ps2_cod_registrar(info->t_addr, info->t_size);
+        { extern void ps2_despacho_paginas_de_codigo(void); ps2_despacho_paginas_de_codigo(); }
     }
-    printf("loader: %s lido do disco: %lu bytes em %08lx, PC=%08lx\n", EXE_NOME,
-           (unsigned long)info->t_size, (unsigned long)info->t_addr, (unsigned long)info->pc0);
     return 1;
 }
 
-#include "prof.h"
-unsigned long long g_prof_interp;
-static int ps2_interp_run_medido(CPUState *cpu)
-{
-    uint32_t t0 = prof_agora();
-    int r = ps2_interp_run(cpu);
-    g_prof_interp += (uint32_t)(prof_agora() - t0);
-    return r;
-}
 
 int main(int argc, char **argv)
 {
@@ -243,20 +228,12 @@ int main(int argc, char **argv)
     int ok = 0;
     unsigned i;
 
-    /* PCSX2: sem buffer (o log do PCSX2 mostra tudo na hora). */
-    if (argc > 0 && strncmp(argv[0], "host", 4) == 0)
-        setvbuf(stdout, NULL, _IONBF, 0);
-    printf("Tekken 3 PS2 - %s\n", JOGO_VERSAO);
 
     /* PS2 real: reinicia o IOP e prepara o USB antes de tudo (kit) */
     {
-#ifdef PS2_FORCAR_IOP
-        const int forcar = 1;           /* make FORCAR_IOP=1: caminho do console no PCSX2 */
-#else
         const int forcar = 0;
-#endif
         static const char *const nomes[] = { JOGO_ARQUIVOS, NULL };
-        char pasta_elf[200] = JOGO_PASTA_USB, log[256];
+        char pasta_elf[200] = JOGO_PASTA_USB;
         const char *argv0 = argc > 0 ? argv[0] : NULL;
         int r;
 
@@ -277,28 +254,19 @@ int main(int argc, char **argv)
             caminhos[2 * N] = NULL;
             kit_arm_esperar(caminhos, 10000u, NULL, 0);
         }
-        /* PS2 real: o log vai para tekken3_log.txt ao lado do ELF; video_gs.c
-         * grava a cada PS2_LOG_BLOCOS relatórios (só quando o CD não está lendo). */
-        if (r == KIT_ARM_OK && PS2_LOG_BLOCOS > 0) {
-            snprintf(log, sizeof(log), "%s%s", pasta_elf, JOGO_LOG);
-            if (kit_log_iniciar(log)) {
-                extern void ps2_cdrom_io_barreira(void);
-                kit_log_antes_de_gravar(ps2_cdrom_io_barreira);
-                printf("log: gravando em %s\n", log);
-                printf("log: versao %s, compilado em %s %s\n", JOGO_VERSAO, __DATE__, __TIME__);
-                fputs(kit_arm_mensagens(), stdout);
-                kit_log_gravar();       /* já deixa o arquivo com tamanho > 0 */
-            }
-        }
-        /* V43: versão sem log no console: o texto dos relatórios ia para o
-         * IOP (fio, uma chamada por linha) sem ninguém ler; agora é descartado. */
-        if (r == KIT_ARM_OK && PS2_LOG_BLOCOS == 0) kit_log_silenciar();
+        /* sem log: o que ainda sair pelo stdout (bibliotecas) é descartado;
+         * pela rede cada linha esperava o PC */
+        kit_log_silenciar();
+        /* V47: som pelo audsrv (freesd + audsrv embutidos), 48 kHz estéreo */
+        kit_som_iniciar(48000);
     }
 
     memset(cpu, 0, sizeof(*cpu));
     ps2_memory_init(cpu);               /* zera RAM e liga cpu->read/write */
     if (!ps2_video_init()) return 1;
-    kit_controle_iniciar(1);            /* sem controle o jogo segue mesmo assim */
+    kit_controle_iniciar(2);            /* V59: portas 1 e 2; sem controle o jogo segue mesmo assim */
+    { extern void ps2_cartao_iniciar(void); ps2_cartao_iniciar(); }   /* V59: memory card */
+    ps2_abertura(JOGO_VERSAO_NUM);      /* V59: telas de início (abertura.c) */
 
     /* Disco primeiro: procura a imagem na pasta do ELF (ver cdrom.c). */
     {
@@ -309,12 +277,10 @@ int main(int argc, char **argv)
             memcpy(pasta, caminho, n);
             pasta[n] = '\0';
         }
-        if (!ps2_cdrom_abrir(pasta)) {
-            printf("ERRO: imagem do disco nao encontrada. Coloque TEKKEN3.BIN "
-                   "(faixa 1 do jogo) ao lado do tekken3.elf.\n");
-            kit_log_gravar();
+        /* V53: sem o disco ao lado do ELF (ex.: ELF de teste noutra pasta do
+         * OPL), tenta a pasta padrão do jogo no pendrive */
+        if (!ps2_cdrom_abrir(pasta) && !ps2_cdrom_abrir(JOGO_PASTA_USB))
             return 1;
-        }
     }
 
     /* Executável: arquivo ao lado do ELF, alternativas, ou de dentro do disco */
@@ -324,7 +290,6 @@ int main(int argc, char **argv)
         ok = carregar_exe(alternativas[i], &info);
     if (!ok) ok = carregar_exe_do_disco(&info);
     if (!ok) {
-        printf("ERRO: %s nao encontrado nem no disco.\n", EXE_NOME);
         return 1;
     }
 
@@ -335,43 +300,33 @@ int main(int argc, char **argv)
     cpu->gpr[30] = sp;         /* fp */
     cpu->pc = info.pc0;
 
-    printf("Entrando no jogo em %08lx (sp=%08lx gp=%08lx)\n",
-           (unsigned long)cpu->pc, (unsigned long)sp,
-           (unsigned long)info.gp0);
 
     /*
      * Laço de despacho (trampolim CPS). O código gerado não chama a próxima
      * função direto: cada função termina gravando o próximo endereço em
      * cpu->pc ("CPS jal" / "CPS: jr $ra") e retorna. Este laço continua a
      * execução a partir de cpu->pc até cair num endereço sem código
-     * compilado (BIOS, overlay...), quando o runtime para com o log.
+     * compilado (BIOS, overlay...), quando o runtime para.
      */
     /* Volta aqui (longjmp) quando uma interrupção é entregue ao jogo:
      * cpu->pc já aponta para o handler. */
+    /* V56: pilha do EE em posição fixa no cache de dados (quente.h). Antes do
+     * setjmp: a volta por longjmp restaura esta mesma posição. */
+    PS2_PILHA_EM(PS2_PILHA_JOGO);
     (void)setjmp(g_ps2_volta_ao_laco);
     for (;;) {
         uint32_t alvo = cpu->pc;
-        if (!psx_dispatch_game_compiled(cpu, alvo) &&
+        if (!despachar(cpu, alvo) &&
             !ps2_bios_call(cpu, alvo) &&
-            !ps2_interp_run_medido(cpu)) {
-            printf("PARADA: endereco %08lx nao esta no dispatch "
-                   "(ra=%08lx a0=%08lx t1=%08lx) apos %lu despachos\n",
-                   (unsigned long)alvo, (unsigned long)cpu->gpr[31],
-                   (unsigned long)cpu->gpr[4], (unsigned long)cpu->gpr[9],
-                   (unsigned long)g_despachos);
-            return 1;
+            !ps2_interp_run(cpu)) {
+            return 1;          /* endereço fora do código conhecido */
         }
         /* A função "compilada" era um stub de dado: interpreta (overlay). */
         if (g_ps2_interpretar_em != 0u && cpu->pc == g_ps2_interpretar_em) {
             g_ps2_interpretar_em = 0u;
-            if (!ps2_interp_run_medido(cpu)) {
-                printf("PARADA: %08lx nao e RAM executavel\n", (unsigned long)cpu->pc);
-                return 1;
+            if (!ps2_interp_run(cpu)) {
+                return 1;      /* não é RAM executável */
             }
         }
-        if ((++g_despachos & 0xFFFFFu) == 0u)   /* ~1 milhão */
-            printf("vivo: %lu despachos, pc=%08lx, interpretadas=%lu\n",
-                   (unsigned long)g_despachos, (unsigned long)cpu->pc,
-                   g_ps2_interp_instr);
     }
 }

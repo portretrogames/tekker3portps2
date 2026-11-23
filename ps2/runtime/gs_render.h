@@ -36,8 +36,7 @@ void gsr_enviar(const uint16_t *sombra, unsigned x, unsigned y, unsigned w, unsi
 void gsr_definir_sombra(const uint16_t *sombra);
 void gsr_exibir(uint32_t tela_bytes, unsigned tela_fbw, unsigned tela_psm, unsigned tela_w, unsigned tela_h,
                 unsigned x, unsigned y, unsigned w, unsigned h);
-void gsr_painel(const char *texto);      /* texto do painel ("\n" = nova linha) */
-void gsr_painel_alternar(void);
+void gsr_autoteste(void);                /* boot: caminho direto x antigo dos polígonos */
 void gsr_flush(void);            /* manda o que estiver na fila */
 void gsr_estado_perdido(void);   /* outro código (gsKit) mexeu nos registradores */
 

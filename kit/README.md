@@ -13,9 +13,11 @@ repositório próprio (`ps2-port-kit`) usado como submódulo git — ver
 
 | módulo | header | o que faz |
 |---|---|---|
-| controle | `kit/controle.h` | libpad: abre 1 ou 2 portas, lê botões (ativo em 0, layout PS1/PS2), estado de conexão |
+| controle | `kit/controle.h` | libpad: abre 1 ou 2 portas, lê botões (ativo em 0, layout PS1/PS2), estado de conexão; 0.3.3: DualShock em modo analógico (sem trava) e sticks `lx/ly/rx/ry` |
+| cartao | `kit/cartao.h` | 0.3.3: memory card do PS2 (rom0:MCMAN/MCSERV + libmc): leitura síncrona; gravação em etapas sem travar o jogo, por `~NOME` (o rom0:MCSERV não renomeia) |
 | armazenamento | `kit/armazenamento.h` | caminho `host:` (PCSX2) ou USB do console: reinicia o IOP, carrega iomanX, fileXio, usbd, bdm, bdmfs_fatfs (FAT32/exFAT) e usbmass_bd embutidos no ELF, espera o pendrive montar |
-| diagnóstico | `kit/diagnostico.h` | log em arquivo no pendrive (printf → buffer na RAM, abre/acrescenta/fecha a cada ~2 s), estado curto para painel, relógio do EE |
+| diagnóstico | `kit/diagnostico.h` | log em arquivo no pendrive (printf → buffer na RAM, abre/acrescenta/fecha quando o jogo pede, no Tekken a cada ~30 s), estado curto para painel, relógio do EE |
+| som | `kit/som.h` | PCM 16 bits estéreo pelo audsrv: carrega o freesd e o audsrv do kit (`iop/audsrv`, o do PS2SDK com o volume do PCM corrigido, vindo do port SMW PS2; LGPL-2) embutidos no ELF; envia sem nunca esperar o IOP e completa com silêncio (o IOP repete o buffer dele se ninguém mandar nada) |
 
 Próximas etapas (ainda no projeto do Tekken, `ps2/runtime/`):
 - camada PS1: GPU→GS, GTE, MDEC, CD, BIOS HLE, IRQ/timers/DMA, RAM;
@@ -43,15 +45,17 @@ if (kit_arm_preparar(argv[0], 0) == KIT_ARM_OK)      /* console: USB */
 kit_log_iniciar(caminho_do_log);                      /* printf -> log */
 kit_controle_iniciar(1);
 /* a cada quadro: */ kit_controle_ler(0, &estado);
-/* a cada ~2 s:   */ kit_log_gravar();
+/* de tempos em tempos (CD parado): */ kit_log_gravar();
 ```
 
 ## Dependências e limitações
 
-- ps2sdk (libpad, libfileXio, libpatches); os IRX vêm de `$(PS2SDK)/iop/irx`.
+- ps2sdk (libpad, libfileXio, libpatches, libaudsrv); os IRX vêm de `$(PS2SDK)/iop/irx`, menos o
+  audsrv, compilado de `iop/audsrv` pelo `kit.mk` (precisa do toolchain do IOP, `mipsel-none-elf`).
 - Controle: só digital (sem analógico/vibração).
 - Armazenamento: só USB (sem HDD/MX4SIO); a espera é por polling de `fopen`.
-- Log: buffer de 64 KB entre gravações; o excedente é descartado e contado.
+- Log: buffer de 256 KB entre gravações (`KIT_LOG_BUF`); o excedente é descartado, contado e
+  avisado no arquivo na gravação seguinte.
 - Quem usa leitura assíncrona do fileXio deve registrar
   `kit_log_antes_de_gravar()` para terminar a leitura antes de o log usar o
   fileXio (o Tekken faz isso com o CD).

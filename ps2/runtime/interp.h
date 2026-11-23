@@ -14,7 +14,6 @@
  * inicial não é RAM executável (aí o laço para com erro). */
 int ps2_interp_run(CPUState *cpu);
 
-extern unsigned long g_ps2_interp_instr;
 
 /* Endereço que o código compilado pediu para interpretar (stubs.c). */
 extern uint32_t g_ps2_interpretar_em;   /* contador (diagnóstico) */

@@ -1,20 +1,39 @@
 # Tekken 3 — port nativo para PlayStation 2
 
-Port do **Tekken 3 (PS1, USA, SLUS-00402)** para o **PS2**, sem emulação: o
-código MIPS do PS1 é recompilado estaticamente para C (psxrecomp) e compilado
-para o Emotion Engine com o ps2sdk. O hardware do PS1 (GPU→GS, GTE, MDEC, CD,
-BIOS, IRQ/DMA) é reimplementado no runtime deste repositório.
+Port do **Tekken 3 (PS1, USA, SLUS-00402)** para o **PS2**, sem emulação: o código MIPS
+do PS1 é recompilado estaticamente para C (PSXRecomp) e compilado para o Emotion Engine
+com o ps2sdk. O hardware do PS1 (GPU→GS, GTE, MDEC, CD, SPU, BIOS, IRQ/DMA) é refeito no
+runtime deste repositório.
 
-Projeto gratuito e sem fins comerciais.
+**Página do port, com o pacote para baixar e como jogar:**
+https://portretrogames.github.io/tekker3portps2/
+
+Projeto gratuito e sem fins comerciais, da Retrogames Patos de Minas.
+
+## Duas versões do código
+
+| Ramo | Para quê |
+|---|---|
+| **`main`** (padrão) | **Versão limpa**, para jogar: só o que o jogo usa, sem log nem painel. |
+| **`depuracao`** | **Versão completa**, para testes: log no pendrive e pela rede, painel de desempenho (L3+R3), contadores do processador e as ferramentas de análise. Parada na V60. |
+
+Cada release traz os dois ELFs: o pacote normal e o de **depuração** (grava o
+`tekken3_log.txt` ao lado do ELF, para anexar quando for reportar um erro).
+
+## Achou um erro?
+
+[Reportar erro](https://github.com/portretrogames/tekker3portps2/issues/new?template=erro.yml):
+o formulário pede a versão, como o jogo foi aberto e o que aconteceu, e aceita fotos,
+vídeos e o log arrastados para a caixa.
 
 ## O que NÃO está aqui
 
-Este repositório tem só o código do port. **Nada do jogo é distribuído:**
+Este repositório tem só o código do port. **O disco do jogo não é distribuído:**
 
-- o dump do disco (`*.bin` / `*.cue`) — use o seu próprio, do seu disco original;
-- o C gerado a partir do executável do jogo (`gerado/`, `build/r/nativo.c`);
-- executáveis compilados (`*.elf`), logs e capturas de tela do jogo;
-- `referencia/` (psxrecomp e headers de terceiros).
+- a imagem do disco (`*.bin` / `*.cue`): use a sua, do seu disco original;
+- o C gerado a partir do executável do jogo (`gerado/`) e o `SLUS_004.02`;
+- executáveis compilados (`*.elf`) e logs (os ELFs ficam só nas Releases);
+- `referencia/` (PSXRecomp e headers de terceiros).
 
 O `.gitignore` bloqueia esses arquivos.
 
@@ -22,20 +41,20 @@ O `.gitignore` bloqueia esses arquivos.
 
 | Pasta | Conteúdo |
 |---|---|
-| `ps2/runtime/` | runtime do port (PS1 → PS2): GPU→GS, GTE, MDEC, CD, BIOS HLE, IRQ/DMA |
-| `ps2/tools/` | transformação do código gerado, tradutor de rotinas para C nativo, teste no PCSX2 |
+| `ps2/runtime/` | runtime do port (PS1 → PS2): GPU→GS, GTE, MDEC, CD, SPU, BIOS HLE, IRQ/DMA, memory card |
+| `ps2/tools/` | transformação do código gerado, tradutor de rotinas para C nativo, empacotamento |
 | `ps2/tests/` | testes no PC (`make test`) |
-| `ps2/docs/` | documentação (PS2 real/OPL, PCSX2 Linux, auditorias, histórico) |
-| `kit/` | **ps2-port-kit**: bibliotecas reutilizáveis (controle, armazenamento, diagnóstico) |
+| `ps2/docs/` | documentação (PS2 real/OPL, histórico das versões) |
+| `kit/` | **ps2-port-kit**: bibliotecas reutilizáveis (controle, armazenamento, som, memory card) |
+| `site/` | a página do port no GitHub Pages |
 
-Detalhes de compilação e teste: [`ps2/README.md`](ps2/README.md).
+Compilação e testes: [`ps2/README.md`](ps2/README.md). Rodar no PS2:
+[`ps2/docs/PS2_REAL.md`](ps2/docs/PS2_REAL.md).
 
-## Estado
+## Créditos
 
-- Boot pelo pendrive (OPL) no PS2 real, menus, controle, vídeos (MDEC) e lutas
-  completas com renderização no GS.
-- **As lutas rodam a ~83% da velocidade no console (V36)**, medido pelo
-  relógio do round (40 s do jogo em 48 s; no PS1 real, 39 s). A V35 corrigiu
-  a perda de IRQs do timer 2, que marca o ritmo do jogo (era ~71%). Detalhes
-  e próximos passos em [`ps2/docs/STATUS_V36.md`](ps2/docs/STATUS_V36.md).
-- Ainda sem som e sem memory card. A abertura (FMV) é pulada.
+- **PSXRecomp** — mstan (licença PolyForm Noncommercial 1.0.0)
+- **Tekken3Recompiled** — FishB0nes98 (mapas de funções e patches do Tekken 3)
+- **ps2dev / PS2SDK / gsKit** e o **Open PS2 Loader**
+
+*Tekken 3* © Bandai Namco Entertainment. Projeto de fãs, sem ligação com a Bandai Namco.

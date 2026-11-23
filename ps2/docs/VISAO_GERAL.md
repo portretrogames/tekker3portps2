@@ -38,7 +38,10 @@ runtime, o kit, os testes e as decisões.
   numa tabela (22.325 entradas), valida se o código na RAM ainda é o
   original (overlays) e chama. ~275 mil despachos/s na luta.
 - Código que não foi recompilado (overlays carregados do CD, p.ex. o
-  tocador de vídeo da abertura) roda num **interpretador** (`interp.c`).
+  tocador de vídeo da abertura) roda num **interpretador** (`interp.c`). Rotinas
+  folha pesadas de overlay podem ir para C nativo (`tools/nativas_overlay.txt`,
+  V48: o decodificador VLC do vídeo); o interpretador só usa a versão nativa se
+  a RAM tiver exatamente o código traduzido.
 - O build compila uma **cópia transformada** (`ps2/tools/transformar_gerado.py`
   → `build/r/`): `restrict` no ponteiro da CPU e cache na frente da busca
   do despacho. `gerado/` nunca é editado.
@@ -68,7 +71,9 @@ runtime, o kit, os testes e as decisões.
 | `cdrom.c` | controlador do CD; lê o `.bin` com **leitura antecipada assíncrona** (fileXio NOWAIT, 2 buffers de 32 setores) |
 | `pad.c` | protocolo SIO do controle do PS1 (alimentado pelo kit) |
 | `interp.c` | interpretador MIPS para overlays |
+| `nativo_overlay.h` | tabela das rotinas de overlay em C nativo (usada por `interp.c` e pelo `build/r/nativo.c`) |
 | `stubs.c` | ligações com o código gerado (syscall, desvios desconhecidos, amostragem de perfil) |
+| `trace_fmv.c` | rastreio do vídeo (MDEC, DMA, anel do CD) no log, só com `make TRACE_FMV=1` |
 
 ## 4. Estado atual
 
@@ -78,8 +83,11 @@ lutas completas (rounds, vitória/derrota), estabilidade de 12+ min.
 1. **Velocidade da luta no console** — o jogo inteiro (relógio e animação)
    anda devagar. Medido na V14 pelo vídeo do usuário: ~1/4 da velocidade.
    V15–V17 trouxeram ganhos grandes no PCSX2; falta medir no console.
-2. **Abertura (FMV) pula** — o tocador é overlay interpretado e não acompanha.
-3. Sem som (SPU/XA/CDDA), sem memory card, sem analógico.
+2. ~~Abertura (FMV) pula~~ — resolvido na V48: era o DICR escrito em 8 bits pelo
+   libcd (ver `ANALISE_V42_V43.md`, V48); no PCSX2 o vídeo toca inteiro a ~20
+   quadros/s com a música em tempo real.
+3. Som: música XA desde a V47; efeitos/vozes (SPU) e CDDA ainda mudos. Sem memory
+   card, sem analógico.
 
 ## 5. Histórico de desempenho (console)
 

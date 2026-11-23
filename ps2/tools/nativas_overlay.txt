@@ -1,0 +1,14 @@
+# V48: rotinas folha de OVERLAYS (código que o jogo carrega do CD durante o
+# jogo e que roda no interpretador, runtime/interp.c) traduzidas para C nativo
+# por tools/nativo.py. Formato: inicio:fim lba:base
+#   inicio:fim = da 1a instrução ao slot de atraso do último jr $ra;
+#   lba:base   = o overlay está no .bin a partir do setor lba (2048 bytes de
+#                dados por setor) e o jogo o carrega no endereço base.
+# Antes de usar a versão nativa o interpretador confere se a RAM tem
+# exatamente estas instruções (outro overlay no mesmo endereço = interpreta).
+#
+# Tocador do vídeo da abertura (carregado em 800B8D58 a partir do setor
+# 251748): decodificador VLC dos quadros (formato BS v3 -> códigos do MDEC),
+# chamado de 800E1CD8 uma vez por quadro. No PCSX2 era a maior parte do
+# tempo do interpretador durante o vídeo.
+800E2714:800E2A70 251748:800B8D58

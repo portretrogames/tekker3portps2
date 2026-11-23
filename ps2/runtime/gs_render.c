@@ -1,4 +1,6 @@
 /* gs_render.c — ver gs_render.h. Registradores: GS User's Manual. */
+#include "ram.h"
+#include "quente.h"
 #include "gs_render.h"
 
 #include <stdio.h>
@@ -7,10 +9,6 @@
 #include <dmaKit.h>
 
 int g_gsr_ativo;
-unsigned long g_gsr_texflush;
-unsigned long long g_prof_espera_gs;
-unsigned long long g_prof_gpu_hash, g_prof_gsr_poli;   /* V28: detalhe do desenho */
-unsigned long g_gsr_paginas, g_gsr_envios, g_gsr_envio_px, g_gsr_flushes, g_gsr_prims;
 
 /* ---------------- registradores e formatos do GS ---------------- */
 enum {
@@ -28,9 +26,9 @@ enum { PSM_CT16 = 0x02, PSM_T8 = 0x13, PSM_T4 = 0x14 };
 /* ---------------- fila de pacotes (2 buffers, DMA para o GIF) ---------------- */
 #define FILA_QW 32768u
 static uint64_t fila[2][FILA_QW * 2] __attribute__((aligned(64)));
-static int      fila_atual;
-static uint32_t fila_n;              /* qwords usados no buffer atual */
-static int      dma_ocupado;
+static PS2_QUENTE int      fila_atual;
+static PS2_QUENTE uint32_t fila_n;              /* qwords usados no buffer atual */
+static PS2_QUENTE int      dma_ocupado;
 
 /*
  * A fila é escrita pelo segmento UCAB (0x30000000): sem cache e com buffer
@@ -43,12 +41,7 @@ static uint64_t *fila_ptr(void) { return UCAB(&fila[fila_atual][fila_n * 2u]); }
 void gsr_flush(void)
 {
     if (!fila_n) return;
-    g_gsr_flushes++;
-    if (dma_ocupado) {
-        uint32_t t0; __asm__ volatile("mfc0 %0, $9" : "=r"(t0));
-        dmaKit_wait(DMA_CHANNEL_GIF, 0);
-        { uint32_t t1; __asm__ volatile("mfc0 %0, $9" : "=r"(t1)); g_prof_espera_gs += (uint32_t)(t1 - t0); }
-    }
+    if (dma_ocupado) dmaKit_wait(DMA_CHANNEL_GIF, 0);
     __asm__ volatile("sync.l");          /* esvazia o buffer de escrita UCAB */
     dmaKit_send_ucab(DMA_CHANNEL_GIF, fila_ptr() - fila_n * 2u, fila_n);
     dma_ocupado = 1;
@@ -77,32 +70,33 @@ static void ad(uint32_t reg, uint64_t valor)
 }
 
 /* ---------------- memória do GS ---------------- */
-static uint32_t vram_fbp, vram_tbp;     /* buffer da VRAM do PS1 */
+static PS2_QUENTE uint32_t vram_fbp, vram_tbp;     /* buffer da VRAM do PS1 */
 
 typedef struct {
     uint32_t tbp;
     int tx, ty, prof;           /* prof: 0 = 4 bits, 1 = 8 bits; -1 = livre */
-    uint32_t versao;
+    uint64_t versao;            /* versao_pagina: 2 colunas em 64 bits */
     uint32_t uso;
 } Fatia;
 #define MAX_FATIAS 40
-static Fatia fatias[MAX_FATIAS];
-static unsigned n_fatias;
-static uint32_t relogio_uso;
-static uint32_t versao_col[16][2];      /* colunas de 64 px x metades de 256 linhas */
+static PS2_QUENTE Fatia fatias[MAX_FATIAS];
+static PS2_QUENTE unsigned n_fatias;
+static PS2_QUENTE uint32_t relogio_uso;
+static PS2_QUENTE uint32_t versao_col[16][2];      /* colunas de 64 px x metades de 256 linhas */
 
 /* ---------------- estado atual (para não repetir registradores) ---------------- */
-static uint64_t c_tex0, c_clamp, c_texclut, c_alpha, c_test, c_scissor;
-static int c_pabe = -1, c_fba = -1, c_dthe = -1, c_validos;
-static uint32_t textura_versao;         /* muda quando a VRAM/cache muda: recarrega CLUT */
+static PS2_QUENTE uint64_t c_tex0, c_clamp, c_texclut, c_alpha, c_test, c_scissor;
+static int c_pabe = -1, c_fba = -1, c_dthe = -1;
+static PS2_QUENTE int c_validos;
+static PS2_QUENTE uint32_t textura_versao;         /* muda quando a VRAM/cache muda: recarrega CLUT */
 /* TEXFLUSH esvazia o pipeline do GS: só quando a memória de textura mudou
  * (uploads, cópias, preenchimentos) ou, para texturas de 15 bits lidas da
  * própria VRAM, depois de algum desenho. Antes ia em toda troca de textura. */
 static int textura_suja = 1, desenhou_desde_flush = 1;
-static uint32_t c_tex_versao;
+static PS2_QUENTE uint32_t c_tex_versao;
 
 void gsr_estado_perdido(void) { c_validos = 0; }
-static int chave_valida;
+static PS2_QUENTE int chave_valida;
 
 static void base(void)
 {
@@ -147,9 +141,14 @@ int gsr_init(uint32_t vram_bytes, uint32_t cache_bytes, unsigned slots)
     }
     n_fatias = slots;
     base();
+    /* V49: a memória do GS no console vem com o que o OPL/navegador deixou lá
+     * (no PCSX2 vem zerada). A sombra da VRAM começa zerada, então a cópia no
+     * GS também: antes, área ainda não escrita pelo jogo aparecia como lixo
+     * colorido (tela verde antes do "NAMCO PRESENTS" e linha no pé dela). */
+    gsr_preencher(0, 0, 1024u, 512u, 0);
+    gsr_flush();
+    dmaKit_wait(DMA_CHANNEL_GIF, 0);
     g_gsr_ativo = 1;
-    printf("gs: VRAM do PS1 no GS em %08lx, cache de texturas: %u fatias\n",
-           (unsigned long)vram_bytes, slots);
     return 1;
 }
 
@@ -172,18 +171,21 @@ static void invalidar(unsigned x, unsigned y, unsigned w, unsigned h)
     textura_suja = 1;
 }
 
-static uint32_t versao_pagina(int tx, int ty, int prof)
+static uint64_t versao_pagina(int tx, int ty, int prof)
 {
+    /* V51: 8 bits ocupa 2 colunas: as duas versões lado a lado em 64 bits
+     * (a + b<<16 em 32 bits repetia depois de 65536 envios numa coluna e a
+     * textura podia sair velha). Achado na revisão do port do SOTN. */
     unsigned c = (unsigned)tx / 64u, l = (unsigned)ty / 256u;
-    uint32_t v = versao_col[c][l];
-    if (prof == 1) v += versao_col[(c + 1u) & 15u][l] << 16;
+    uint64_t v = versao_col[c][l];
+    if (prof == 1) v |= (uint64_t)versao_col[(c + 1u) & 15u][l] << 32;
     return v;
 }
 
 static const uint16_t *sombra_vram;      /* para enviar páginas ao cache */
 /* blocos (colunas de 64 px x metades de 256 linhas) já lidos como textura de
  * 4/8 bits: só neles a sombra em RAM precisa refletir preenchimentos */
-static uint32_t blocos_textura;
+static PS2_QUENTE uint32_t blocos_textura;
 #define BLOCO_TEX(c, l) (1u << (((l) & 1u) * 16u + ((c) & 15u)))
 
 int gsr_area_com_textura(unsigned x, unsigned y, unsigned w, unsigned h)
@@ -240,11 +242,11 @@ static void upload_imagem(uint32_t dbp, uint32_t dbw, uint32_t dpsm, unsigned dx
     }
 }
 
-static Fatia *ultima_fatia;
+static PS2_QUENTE Fatia *ultima_fatia;
 static Fatia *pagina_indices(int tx, int ty, int prof)
 {
     unsigned i, melhor = 0;
-    uint32_t v = versao_pagina(tx, ty, prof);
+    uint64_t v = versao_pagina(tx, ty, prof);
     Fatia *f = ultima_fatia;
     if (f && f->prof == prof && f->tx == tx && f->ty == ty && f->versao == v) return f;
     for (i = 0; i < n_fatias; i++) {
@@ -291,7 +293,6 @@ enviar:
     }
     textura_versao++;
     textura_suja = 1;
-    g_gsr_paginas++;
     ultima_fatia = f;
     return f;
 }
@@ -376,7 +377,6 @@ static void estado_textura(const GsrEstado *e, unsigned op, uint32_t clut, int *
     if (textura_suja || (prof >= 2u && desenhou_desde_flush)) {
         reservar(2); tag_ad(1); ad(R_TEXFLUSH, 0);
         textura_suja = 0; desenhou_desde_flush = 0;
-        g_gsr_texflush++;
     }
     if (tex0 != c_tex0 || c_tex_versao != textura_versao) {
         c_tex0 = tex0;
@@ -387,8 +387,25 @@ static void estado_textura(const GsrEstado *e, unsigned op, uint32_t clut, int *
     }
 }
 
-static uint64_t xyz(int x, int y) { return (uint64_t)((x + OFS) << 4) | ((uint64_t)((y + OFS) << 4) << 16); }
+/* V51: X/Y do GS são 12.4 sem sinal em 16 bits. Com OFS=2048 o PS1 cabe
+ * (-2048..2046), mas sprite + largura passa de 4095 e vazaria para o Y:
+ * prende em 0..4095 (achado na revisão do port do SOTN). */
+static inline uint32_t coord(int c)
+{
+    c += OFS;
+    if (__builtin_expect((unsigned)c > 4095u, 0)) c = c < 0 ? 0 : 4095;
+    return (uint32_t)c << 4;
+}
+static uint64_t xyz(int x, int y) { return (uint64_t)coord(x) | ((uint64_t)coord(y) << 16); }
+/* Vértice de polígono: 11 bits com sinal + deslocamento de 11 bits com sinal
+ * (gpu.c vertice() / gsr_poligono_pk) = -2048..2046, + OFS = 0..4094: sempre
+ * cabe, sem o limite (que custava ~57 ciclos por polígono no bench). */
+static inline uint64_t xyz_vert(int x, int y)
+{
+    return (uint64_t)((uint32_t)(x + OFS) << 4) | ((uint64_t)((uint32_t)(y + OFS) << 4) << 16);
+}
 static uint64_t uv(int u, int v)  { return (uint64_t)((u << 4) & 0x3FFF) | ((uint64_t)((v << 4) & 0x3FFF) << 16); }
+#define MEIO_TEXEL (8ull | (8ull << 16))   /* +0,5 texel em U e V (somado a um uv() inteiro) */
 static uint64_t rgba(int r, int g, int b, int a)
 {
     return (uint64_t)((uint32_t)(r & 0xFFu) | (uint32_t)(g & 0xFFu) << 8 | (uint32_t)(b & 0xFFu) << 16 | (uint32_t)(a & 0xFFu) << 24) | (0x3F800000ull << 32);
@@ -398,8 +415,8 @@ static uint64_t rgba(int r, int g, int b, int a)
 /* Se nada que afeta os registradores mudou desde o último desenho, pula
  * estado_comum/estado_textura (a maior parte dos polígonos de uma lista). */
 typedef struct { uint32_t modo, janela, area_ini, area_fim, mascara, op, clut, versao; } Chave;
-static Chave ultima_chave;
-static int du_ult, dv_ult;
+static PS2_QUENTE Chave ultima_chave;
+static PS2_QUENTE int du_ult, dv_ult;
 
 static inline int mesma_chave(const GsrEstado *e, unsigned op_bits, uint32_t clut)
 {
@@ -425,9 +442,6 @@ void gsr_poligono(const GsrEstado *e, const GsrVertice *v, int n, unsigned op, u
     int tex = (op & 4u) != 0, semi = (op & 2u) != 0, gouraud = (op & 16u) != 0;
     int du = 0, dv = 0, i, a = tex ? 0x80 : 0x7F;
     uint64_t prim = 4u /* tristrip */ | (1u << 9) /* CTXT 2 */ | (1u << 8) /* UV */;
-    uint32_t tp0, tp1;
-    __asm__ volatile("mfc0 %0, $9" : "=r"(tp0));
-    g_gsr_prims++;
     desenhou_desde_flush = 1;
     /* op relevante para o estado: semi, textura, bruto, gouraud (dither) */
     /* textura de 15 bits ignora a CLUT (lixo no pacote não troca o estado) */
@@ -460,13 +474,11 @@ void gsr_poligono(const GsrEstado *e, const GsrVertice *v, int n, unsigned op, u
                 p[0] = uv(v[i].u + du, v[i].v + dv); p[1] = R_UV;
                 p += 2;
             }
-            p[0] = xyz(v[i].x, v[i].y); p[1] = R_XYZ2;
+            p[0] = xyz_vert(v[i].x, v[i].y); p[1] = R_XYZ2;
             p += 2;
         }
         fila_n += 1u + k;
     }
-    __asm__ volatile("mfc0 %0, $9" : "=r"(tp1));
-    g_prof_gsr_poli += (uint32_t)(tp1 - tp0);
 }
 
 static inline int s11(uint32_t n) { return (int)((int32_t)(n << 21) >> 21); }
@@ -483,8 +495,6 @@ void gsr_poligono_pk(const GsrEstado *e, const uint32_t *pk, unsigned op, uint32
     uint32_t a = tex ? 0x80u : 0x7Fu;
     uint64_t prim = 4u | (1u << 9) | (1u << 8);
     const uint32_t *q = pk + 1;
-    uint32_t tp0, tp1;
-    __asm__ volatile("mfc0 %0, $9" : "=r"(tp0));
     cor[0] = pk[0];
     for (i = 0; i < n; i++) {
         uint32_t pos;
@@ -502,7 +512,6 @@ void gsr_poligono_pk(const GsrEstado *e, const uint32_t *pk, unsigned op, uint32
         if (ys[i] > maxy) maxy = ys[i];
     }
     if (maxx - minx > 1023 || maxy - miny > 511) return;
-    g_gsr_prims++;
     desenhou_desde_flush = 1;
     if (!mesma_chave(e, (op & 0x17u) | 0x100u, (tex && ((e->modo >> 7) & 3u) < 2u) ? clut : 0u)) {
         estado_comum(e, semi, tex, gouraud && (e->modo & 0x200u));
@@ -532,14 +541,12 @@ void gsr_poligono_pk(const GsrEstado *e, const uint32_t *pk, unsigned op, uint32
                 p[0] = (uint64_t)(u & 0x3FFFu) | ((uint64_t)(v & 0x3FFFu) << 16); p[1] = R_UV;
                 p += 2;
             }
-            p[0] = (uint64_t)(uint32_t)((xs[i] + OFS) << 4) | ((uint64_t)(uint32_t)((ys[i] + OFS) << 4) << 16);
+            p[0] = xyz_vert(xs[i], ys[i]);
             p[1] = R_XYZ2;
             p += 2;
         }
         fila_n += 1u + k;
     }
-    __asm__ volatile("mfc0 %0, $9" : "=r"(tp1));
-    g_prof_gsr_poli += (uint32_t)(tp1 - tp0);
 }
 
 void gsr_sprite(const GsrEstado *e, const GsrVertice *p, int w, int h, unsigned op, uint32_t clut)
@@ -562,9 +569,16 @@ void gsr_sprite(const GsrEstado *e, const GsrVertice *p, int w, int h, unsigned 
     tag_ad(tex ? 6u : 4u);
     ad(R_PRIM, prim);
     ad(R_RGBAQ, rgba(r, g, b, a));
-    if (tex) ad(R_UV, uv(p->u + du, p->v + dv));
+    /* V50: UV no centro do texel (+8 = meio texel). Testes no GS de verdade
+     * (PCSX2 PR 14029): num sprite de largura/altura que não é potência de 2,
+     * o U/V interpolado em cima de um inteiro arredonda PARA BAIXO, menos na
+     * 1ª coluna/linha. Com UV inteiro, cada letra do texto do PUSH START saía
+     * deslocada 1 texel (1ª coluna e 1ª linha repetidas, parte de baixo
+     * "puxada"); o PCSX2 arredonda para cima e mostrava certo. O sprite do
+     * PS1 é sempre 1:1, então o meio texel escolhe o mesmo texel nos dois. */
+    if (tex) ad(R_UV, uv(p->u + du, p->v + dv) + MEIO_TEXEL);
     ad(R_XYZ2, xyz(p->x, p->y));
-    if (tex) ad(R_UV, uv(p->u + du + w, p->v + dv + h));
+    if (tex) ad(R_UV, uv(p->u + du + w, p->v + dv + h) + MEIO_TEXEL);
     ad(R_XYZ2, xyz(p->x + w, p->y + h));
 }
 
@@ -573,6 +587,7 @@ void gsr_linha(const GsrEstado *e, const GsrVertice *p, const GsrVertice *q, uns
     int semi = (op & 2u) != 0, gouraud = (op & 16u) != 0;
     uint64_t prim = 1u /* linha */ | (1u << 9) | (1u << 8);
     chave_valida = 0;
+    desenhou_desde_flush = 1;       /* V51: textura de 15 bits lida depois precisa de TEXFLUSH */
     estado_comum(e, semi, 0, 0);
     if (gouraud) prim |= 1u << 3;
     if (semi) prim |= 1u << 6;
@@ -580,9 +595,9 @@ void gsr_linha(const GsrEstado *e, const GsrVertice *p, const GsrVertice *q, uns
     tag_ad(5);
     ad(R_PRIM, prim);
     ad(R_RGBAQ, rgba(p->r, p->g, p->b, 0x7F));
-    ad(R_XYZ2, (uint64_t)(((p->x + OFS) << 4) + 8) | ((uint64_t)(((p->y + OFS) << 4) + 8) << 16));
+    ad(R_XYZ2, (uint64_t)(coord(p->x) + 8u) | ((uint64_t)(coord(p->y) + 8u) << 16));
     ad(R_RGBAQ, gouraud ? rgba(q->r, q->g, q->b, 0x7F) : rgba(p->r, p->g, p->b, 0x7F));
-    ad(R_XYZ2, (uint64_t)(((q->x + OFS) << 4) + 8) | ((uint64_t)(((q->y + OFS) << 4) + 8) << 16));
+    ad(R_XYZ2, (uint64_t)(coord(q->x) + 8u) | ((uint64_t)(coord(q->y) + 8u) << 16));
 }
 
 void gsr_preencher(unsigned x, unsigned y, unsigned w, unsigned h, uint16_t cor)
@@ -611,13 +626,47 @@ void gsr_preencher(unsigned x, unsigned y, unsigned w, unsigned h, uint16_t cor)
     chave_valida = 0;
 }
 
+static void copiar_pedaco(unsigned sx, unsigned sy, unsigned dx, unsigned dy, unsigned w, unsigned h);
+
+/* V51: a VRAM do PS1 dá a volta em 1024x512 (a sombra em gpu.c também); no
+ * GS um retângulo que passa da borda iria para fora da área. Divide nas
+ * bordas da origem e do destino, em ordem compatível com a direção. */
 void gsr_copiar(unsigned sx, unsigned sy, unsigned dx, unsigned dy, unsigned w, unsigned h)
+{
+    unsigned cx[4], cy[4], nx = 0, ny = 0, a, b, k, t;
+    if (!w || !h) return;
+    sx &= 1023u; dx &= 1023u; sy &= 511u; dy &= 511u;
+    cx[nx++] = 0;
+    if (sx + w > 1024u) cx[nx++] = 1024u - sx;
+    if (dx + w > 1024u && 1024u - dx != (nx > 1 ? cx[1] : 0u)) cx[nx++] = 1024u - dx;
+    if (nx == 3 && cx[2] < cx[1]) { t = cx[1]; cx[1] = cx[2]; cx[2] = t; }
+    cx[nx] = w;
+    cy[ny++] = 0;
+    if (sy + h > 512u) cy[ny++] = 512u - sy;
+    if (dy + h > 512u && 512u - dy != (ny > 1 ? cy[1] : 0u)) cy[ny++] = 512u - dy;
+    if (ny == 3 && cy[2] < cy[1]) { t = cy[1]; cy[1] = cy[2]; cy[2] = t; }
+    cy[ny] = h;
+    for (b = 0; b < ny; b++) {
+        unsigned yb = dy > sy ? ny - 1u - b : b;
+        for (k = 0; k < nx; k++) {
+            unsigned xa = dx > sx ? nx - 1u - k : k;
+            a = cx[xa];
+            copiar_pedaco((sx + a) & 1023u, (sy + cy[yb]) & 511u, (dx + a) & 1023u, (dy + cy[yb]) & 511u,
+                          cx[xa + 1u] - a, cy[yb + 1u] - cy[yb]);
+        }
+    }
+}
+
+static void copiar_pedaco(unsigned sx, unsigned sy, unsigned dx, unsigned dy, unsigned w, unsigned h)
 {
     unsigned dir = 0;
     if (!w || !h) return;
     if (!c_validos) base();
-    if (dy > sy) dir |= 2u;          /* de baixo para cima */
-    if (dx > sx) dir |= 1u;          /* da direita para a esquerda */
+    /* V51: TRXPOS.DIR (GS User's Manual): bit 0 = começa embaixo (de baixo
+     * para cima), bit 1 = começa à direita. Estava trocado: cópia com
+     * sobreposição saía errada (achado na revisão do port do SOTN). */
+    if (dy > sy) dir |= 1u;          /* de baixo para cima */
+    if (dx > sx) dir |= 2u;          /* da direita para a esquerda */
     reservar(6);
     tag_ad(4);
     ad(R_BITBLTBUF, (uint64_t)vram_tbp | (16ull << 16) | ((uint64_t)PSM_CT16 << 24) |
@@ -632,7 +681,6 @@ void gsr_copiar(unsigned sx, unsigned sy, unsigned dx, unsigned dy, unsigned w, 
 void gsr_enviar(const uint16_t *sombra, unsigned x, unsigned y, unsigned w, unsigned h)
 {
     sombra_vram = sombra;
-    g_gsr_envios++; g_gsr_envio_px += w * h;
     if (!w || !h) return;
     if (!c_validos) base();
     y &= 511u; x &= 1023u;
@@ -667,88 +715,28 @@ void gsr_enviar(const uint16_t *sombra, unsigned x, unsigned y, unsigned w, unsi
 /* A sombra também é usada ao montar páginas do cache. */
 void gsr_definir_sombra(const uint16_t *sombra) { sombra_vram = sombra; }
 
-/* ---------------- painel de desempenho (texto na tela) ---------------- */
-static char painel[160];
-static int  painel_ligado = 1;
-void gsr_painel(const char *texto) { strncpy(painel, texto, sizeof(painel) - 1u); }
-void gsr_painel_alternar(void) { painel_ligado = !painel_ligado; }
-
-/* fonte 3x5: 5 linhas de 3 bits (bit 2 = coluna da esquerda) */
-static uint16_t glifo(char c)
-{
-    static const struct { char c; uint16_t g; } f[] = {
-        {'0',075557},{'1',026227},{'2',071747},{'3',071717},{'4',055711},{'5',074717},
-        {'6',074757},{'7',071111},{'8',075757},{'9',075717},{'%',051245},{':',002020},
-        {'/',011244},{'.',000002},{'-',000700},{'A',025755},{'B',065656},{'C',074447},
-        {'D',065556},{'E',074747},{'F',074744},{'G',074557},{'H',055755},{'I',072227},
-        {'J',011157},{'K',055655},{'L',044447},{'M',057755},{'N',065555},{'O',075557},
-        {'P',075744},{'Q',075571},{'R',075655},{'S',074717},{'T',072222},{'U',055557},
-        {'V',055552},{'W',055775},{'X',055255},{'Y',055222},{'Z',071247},
-    };
-    unsigned i;
-    if (c >= 'a' && c <= 'z') c = (char)(c - 32);
-    for (i = 0; i < sizeof(f) / sizeof(f[0]); i++) if (f[i].c == c) return f[i].g;
-    return 0;
-}
-
-static void desenhar_painel(unsigned x0, unsigned y0)
-{
-    const unsigned esc = 2;             /* cada ponto da fonte = 2x2 pixels */
-    unsigned col = 0, lin = 0, largura = 0, linhas = 1, i;
-    const char *t;
-    if (!painel_ligado || !painel[0]) return;
-    for (t = painel, i = 0; *t; t++) {
-        if (*t == '\n') { linhas++; i = 0; continue; }
-        if (++i > largura) largura = i;
-    }
-    /* fundo preto */
-    reservar(5); tag_ad(3);
-    ad(R_PRIM, 6u | (1u << 9));
-    ad(R_RGBAQ, rgba(0, 0, 0, 0x80));
-    ad(R_XYZ2, (uint64_t)((x0 - 2u) << 4) | ((uint64_t)((y0 - 2u) << 4) << 16));
-    reservar(2); tag_ad(1);
-    ad(R_XYZ2, (uint64_t)((x0 + largura * 4u * esc + 2u) << 4) |
-               ((uint64_t)((y0 + linhas * 6u * esc + 2u) << 4) << 16));
-    reservar(2); tag_ad(1);
-    ad(R_RGBAQ, rgba(0xFF, 0xFF, 0x40, 0x80));
-    /* pontos juntados em lotes: um GIFtag para até 128 pontos (antes era um
-     * por ponto, ~600 por VBlank — auditoria V19 2.2) */
-    {
-    static uint64_t lote[256];
-    unsigned nl = 0, k;
-    for (t = painel; *t; t++) {
-        uint16_t g;
-        unsigned r, c;
-        if (*t == '\n') { lin++; col = 0; continue; }
-        g = glifo(*t);
-        for (r = 0; r < 5u; r++)
-            for (c = 0; c < 3u; c++)
-                if (g & (1u << ((4u - r) * 3u + (2u - c)))) {
-                    unsigned px = x0 + (col * 4u + c) * esc, py = y0 + (lin * 6u + r) * esc;
-                    lote[nl++] = (uint64_t)(px << 4) | ((uint64_t)(py << 4) << 16);
-                    lote[nl++] = (uint64_t)((px + esc) << 4) | ((uint64_t)((py + esc) << 4) << 16);
-                    if (nl == 256u) {
-                        reservar(1u + nl); tag_ad(nl);
-                        for (k = 0; k < nl; k++) ad(R_XYZ2, lote[k]);
-                        nl = 0;
-                    }
-                }
-        col++;
-    }
-    if (nl) {
-        reservar(1u + nl); tag_ad(nl);
-        for (k = 0; k < nl; k++) ad(R_XYZ2, lote[k]);
-    }
-    }
-}
-
 /* Copia a área exibida da VRAM do PS1 para a tela (buffer do gsKit). */
 void gsr_exibir(uint32_t tela_bytes, unsigned tela_fbw, unsigned tela_psm, unsigned tela_w, unsigned tela_h,
                 unsigned x, unsigned y, unsigned w, unsigned h)
 {
+    /* V49: amostra no centro de cada pixel da tela (meio texel de folga) e
+     * prende a leitura na área exibida (REGION_CLAMP): no GS de verdade a
+     * amostra em cima da borda de um texel pode cair no vizinho, e a última
+     * linha/coluna lia a VRAM fora da tela */
+    uint64_t clamp = 0;                 /* REPEAT: a área que dá a volta na VRAM continua do outro lado */
+    uint32_t meio_u, meio_v, u_fim;
+    if (!w || !h || !tela_w || !tela_h) return;
+    x &= 1023u; y &= 511u;
+    meio_u = (w * 8u) / tela_w; meio_v = (h * 8u) / tela_h;
+    if (x + w <= 1024u) clamp |= 2u | ((uint64_t)x << 4) | ((uint64_t)(x + w - 1u) << 14);
+    if (y + h <= 512u) clamp |= (2u << 2) | ((uint64_t)y << 24) | ((uint64_t)(y + h - 1u) << 34);
+    /* U tem 14 bits (10.4): x + w = 1024 passaria de 16383 */
+    u_fim = ((x + w) << 4) + meio_u;
+    if (u_fim > 16383u) u_fim = 16383u;
     reservar(16);
-    tag_ad(10);
-    ad(R_CLAMP_2, 0);
+    tag_ad(11);
+    ad(R_PRMODECONT, 1);            /* V51: PRIM manda nos atributos (o gsKit pode ter mudado) */
+    ad(R_CLAMP_2, clamp);
     ad(R_TEX1_2, 0);
     ad(R_FRAME_2, (uint64_t)(tela_bytes / 8192u) | ((uint64_t)tela_fbw << 16) | ((uint64_t)tela_psm << 24));
     ad(R_XYOFFSET_2, 0);
@@ -768,67 +756,24 @@ void gsr_exibir(uint32_t tela_bytes, unsigned tela_fbw, unsigned tela_psm, unsig
         ad(R_PRIM, 6u | (1u << 4) | (1u << 8) | (1u << 9));
         for (faixa = 0; faixa < n; faixa++) {
             unsigned y0 = faixa * 32u, y1 = y0 + 32u > tela_h ? tela_h : y0 + 32u;
-            /* V em 1/16 de texel: y + h * linha / tela_h */
-            uint32_t v0 = (y << 4) + (uint32_t)(((uint64_t)(h << 4) * y0) / tela_h);
-            uint32_t v1 = (y << 4) + (uint32_t)(((uint64_t)(h << 4) * y1) / tela_h);
-            ad(R_UV, (uint64_t)(x << 4) | ((uint64_t)v0 << 16));
+            /* V em 1/16 de texel: y + h * linha / tela_h (+ meio pixel) */
+            uint32_t v0 = (y << 4) + (uint32_t)(((uint64_t)(h << 4) * y0) / tela_h) + meio_v;
+            uint32_t v1 = (y << 4) + (uint32_t)(((uint64_t)(h << 4) * y1) / tela_h) + meio_v;
+            ad(R_UV, (uint64_t)((x << 4) + meio_u) | ((uint64_t)v0 << 16));
             ad(R_XYZ2, (uint64_t)(y0 << 4) << 16);
-            ad(R_UV, (uint64_t)((x + w) << 4) | ((uint64_t)v1 << 16));
+            ad(R_UV, (uint64_t)u_fim | ((uint64_t)v1 << 16));
             ad(R_XYZ2, (uint64_t)(tela_w << 4) | ((uint64_t)(y1 << 4) << 16));
         }
     }
-    desenhar_painel(12, 12);
     c_validos = 0;              /* base() restaura FRAME_2 etc. */
     gsr_flush();
 }
 
-/* V29: medição no console (uma vez, no boot). O PCSX2 não reproduz o custo
- * de memória do EE; estes números dizem onde o desenho gasta ciclos. */
-static inline uint32_t bench_t(void) { uint32_t t; __asm__ volatile("mfc0 %0, $9" : "=r"(t)); return t; }
-void gsr_bench(void)
+/* Autoteste no boot: o caminho direto de cada polígono (lista -> fila do GS)
+ * contra o caminho antigo, 3000 polígonos aleatórios. Qualquer diferença deixa
+ * o caminho antigo ligado. */
+void gsr_autoteste(void)
 {
-    extern uint8_t g_ps1_ram[];
-    uint32_t t0, t1, t2, t3, t4, soma = 0;
-    unsigned i;
-    uint64_t *u = UCAB(&fila[1][0]), *c = &fila[1][0];
-    volatile uint64_t *s = (volatile uint64_t *)0x70000000u;
-    t0 = bench_t();
-    for (i = 0; i < 8192u; i += 2u) { u[i] = i; u[i + 1] = 5u; }
-    __asm__ volatile("sync.l");
-    t1 = bench_t();
-    for (i = 0; i < 8192u; i += 2u) { c[i] = i; c[i + 1] = 5u; }
-    t2 = bench_t();
-    FlushCache(0);
-    t3 = bench_t();
-    for (i = 0; i < 2048u; i += 2u) { s[i] = i; s[i + 1] = 5u; }
-    t4 = bench_t();
-    printf("bench: escrita por qword: UCAB %lu, cache %lu (+ writeback %lu), scratchpad %lu ciclos/100\n",
-           (unsigned long)((t1 - t0) * 100u / 4096u), (unsigned long)((t2 - t1) * 100u / 4096u),
-           (unsigned long)((t3 - t2) * 100u / 4096u), (unsigned long)((t4 - t3) * 100u / 1024u));
-    FlushCache(0);
-    t0 = bench_t();
-    for (i = 0; i < 16384u; i++) soma += *(volatile uint32_t *)&g_ps1_ram[(i * 64u * 37u) & 0x1FFFC0u];
-    t1 = bench_t();
-    for (i = 0; i < 16384u; i++) soma += *(volatile uint32_t *)&g_ps1_ram[(i * 4u) & 0x7FFCu];
-    t2 = bench_t();
-    printf("bench: leitura RAM do PS1: falta de cache %lu ciclos, sequencial %lu ciclos/100 (%lu)\n",
-           (unsigned long)((t1 - t0) * 100u / 16384u), (unsigned long)((t2 - t1) * 100u / 16384u),
-           (unsigned long)(soma & 1u));
-    {   /* polígono típico: texturizado gouraud de 4 vértices, mesmo estado */
-        GsrEstado e; GsrVertice v[4]; unsigned k;
-        memset(&e, 0, sizeof(e)); e.area_fim = 1023u | (511u << 10); e.modo = 0x100u;
-        for (k = 0; k < 4; k++) { v[k].x = 10 + k * 20; v[k].y = 10 + (k & 1) * 30; v[k].u = k * 8; v[k].v = k * 4;
-                                  v[k].r = v[k].g = v[k].b = 0x80; }
-        gsr_poligono(&e, v, 4, 0x3Cu, 0x7FC0u);   /* aquece o estado */
-        fila_n = 0;
-        t0 = bench_t();
-        for (k = 0; k < 256u; k++) gsr_poligono(&e, v, 4, 0x3Cu, 0x7FC0u);
-        t1 = bench_t();
-        fila_n = 0;   /* descarta: nada vai para o GS */
-        chave_valida = 0;
-        printf("bench: gsr_poligono (4 vertices, textura, gouraud) %lu ciclos\n",
-               (unsigned long)((t1 - t0) / 256u));
-    }
     {   /* autoteste V29: caminho direto x caminho antigo, polígonos aleatórios */
         extern void ps2_gpu_gp0_bloco(const uint32_t *p, unsigned n);
         extern int g_ps2_gpu_pk;
@@ -862,47 +807,14 @@ void gsr_bench(void)
             g_ps2_gpu_pk = 1;
             gsr_estado_perdido(); chave_valida = 0; fila_n = 0;
             ps2_gpu_gp0_bloco(pk, (unsigned)((op & 8u) ? 4u : 3u) * (1u + !!(op & 4u)) + 1u + ((op & 16u) ? ((op & 8u) ? 3u : 2u) : 0u));
-            if (fila_n * 2u != nref && nref < 256u) { if (dif++ < 4) printf("bench: gpu DIFERENTE op %02lx tamanho %lu x %lu\n", (unsigned long)op, (unsigned long)nref, (unsigned long)fila_n * 2ul); }
+            if (fila_n * 2u != nref && nref < 256u) dif++;
             else for (w = 0; w < nref; w++) if (UCAB(&fila[fila_atual][0])[w] != ref[w]) {
-                if (dif++ < 4) printf("bench: gpu DIFERENTE op %02lx qword %u\n", (unsigned long)op, w);
+                dif++;
                 break;
             }
             fila_n = 0;
         }
         g_ps2_gpu_pk = dif == 0;
         gsr_estado_perdido(); chave_valida = 0;
-        printf("bench: gpu autoteste direto x antigo: 3000 poligonos, %u diferencas (direto %s)\n",
-               dif, g_ps2_gpu_pk ? "ligado" : "DESLIGADO");
-    }
-    {   /* caminho inteiro: comando GP0 0x3C (12 palavras) -> pacote do GS */
-        extern void ps2_gpu_gp0_bloco(const uint32_t *p, unsigned n);
-        static uint32_t pk[12 * 64];
-        unsigned k, j;
-        for (k = 0; k < 64u; k++) {
-            uint32_t *q = &pk[k * 12u];
-            q[0] = 0x3C808080u;
-            for (j = 0; j < 4u; j++) {
-                if (j) q[j * 3u] = 0x00808080u;
-                q[j * 3u + 1u] = (uint32_t)(10 + j * 20) | ((uint32_t)(10 + (j & 1) * 30) << 16);
-                q[j * 3u + 2u] = (j * 8u) | ((j * 4u) << 8) | (j == 0 ? 0x7FC00000u : j == 1 ? 0x00100000u : 0u);
-            }
-        }
-        ps2_gpu_gp0_bloco(pk, 12u);
-        fila_n = 0;
-        t0 = bench_t();
-        for (k = 0; k < 4u; k++) { ps2_gpu_gp0_bloco(pk, 12u * 64u); fila_n = 0; }
-        t1 = bench_t();
-        chave_valida = 0;
-        printf("bench: comando GP0 de poligono inteiro (lista -> fila do GS) %lu ciclos\n",
-               (unsigned long)((t1 - t0) / 256u));
-        {
-            extern int g_ps2_gpu_pk; int salvo = g_ps2_gpu_pk;
-            g_ps2_gpu_pk = 0;
-            t0 = bench_t();
-            for (k = 0; k < 4u; k++) { ps2_gpu_gp0_bloco(pk, 12u * 64u); fila_n = 0; }
-            t1 = bench_t();
-            g_ps2_gpu_pk = salvo; chave_valida = 0;
-            printf("bench: (caminho antigo: %lu ciclos)\n", (unsigned long)((t1 - t0) / 256u));
-        }
     }
 }

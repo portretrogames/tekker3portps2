@@ -16,6 +16,7 @@ atraso dos desvios sim; atraso de load NÃO (o valor carregado aparece na
 hora, como no código gerado — ex.: mfc2 no slot em 800374FC).
 
 Uso: nativo.py <SLUS_004.02 ou .bin> <saida.c> <inicio:fim> [...]
+     (ou listas .txt; "inicio:fim lba:base" = rotina de overlay, só com o .bin)
 """
 import struct, sys
 
@@ -55,12 +56,39 @@ def ler_exe(caminho):
 
 
 class Rotina:
-    def __init__(self, exe, ini, fim):
-        self.exe, self.ini, self.fim = exe, ini, fim
+    def __init__(self, exe, ini, fim, cod=None):
+        self.exe, self.ini, self.fim, self.cod = exe, ini, fim, cod
 
     def word(self, a):
+        if self.cod is not None:                 # V48: overlay (bytes de ini a fim+4)
+            o = a - self.ini
+            return struct.unpack('<I', self.cod[o:o + 4])[0]
         o = 0x800 + a - BASE
         return struct.unpack('<I', self.exe[o:o + 4])[0]
+
+
+def ler_overlay(caminho, lba, base, ini, fim):
+    """V48: bytes de [ini, fim+4) de um overlay que o jogo carrega do disco
+    (setores de 2048 bytes a partir de 'lba', carregados em 'base').
+    None se a entrada for só o executável (sem o disco não há overlay: o
+    interpretador atende esses endereços)."""
+    if ini < base or fim < ini or (ini | fim | base) & 3:
+        sys.exit('nativo: faixa de overlay invalida %08x:%08x (base %08x)' % (ini, fim, base))
+    out = bytearray()
+    with open(caminho, 'rb') as f:
+        if f.read(8) == b'PS-X EXE':
+            return None
+        a = ini
+        while a < fim + 4:
+            off = a - base
+            s, o = lba + off // 2048, off % 2048
+            n = min(2048 - o, fim + 4 - a)
+            f.seek(s * 2352 + 24 + o)
+            out += f.read(n)
+            a += n
+    if len(out) != fim + 4 - ini:
+        sys.exit('nativo: overlay curto em %08x' % ini)
+    return bytes(out)
 
 
 def sx16(v):
@@ -144,24 +172,32 @@ def decodificar(w, a):
     if op == 0xF:     return alu(rt, '0x%08Xu' % (imm << 16), [])
     end = '%s + 0x%Xu' % (R(rs), simm & 0xFFFFFFFF)
     if op in (0x20, 0x21, 0x23, 0x24, 0x25):
-        f = {0x20: '(uint32_t)(int32_t)(int8_t)ps2_fast_read_byte(%s)',
-             0x24: '(uint32_t)ps2_fast_read_byte(%s)',
-             0x21: '(uint32_t)(int32_t)(int16_t)ps2_fast_read_half(%s)',
-             0x25: '(uint32_t)ps2_fast_read_half(%s)',
-             0x23: 'ps2_fast_read_word(%s)'}[op]
+        f = {0x20: 'ps2_jan_rd8s(%s)',
+             0x24: 'ps2_jan_rd8(%s)',
+             0x21: 'ps2_jan_rd16s(%s)',
+             0x25: 'ps2_jan_rd16(%s)',
+             0x23: 'ps2_jan_rd32(%s)'}[op]
         I.update(tipo='load', esc=rt if rt else None, le={rs}, expr=f % end)
         return I
     if op in (0x28, 0x29, 0x2B):
-        f = {0x28: 'ps2_fast_write_byte(%s, (uint8_t)%s);', 0x29: 'ps2_fast_write_half(%s, (uint16_t)%s);',
-             0x2B: 'ps2_fast_write_word(%s, %s);'}[op]
+        f = {0x28: 'ps2_jan_wr8(%s, (uint8_t)%s);', 0x29: 'ps2_jan_wr16(%s, (uint16_t)%s);',
+             0x2B: 'ps2_jan_wr32(%s, %s);'}[op]
         I.update(tipo='store', le={rs, rt}, c=f % (end, R(rt)))
         return I
     if op == 0x32:  # lwc2
-        I.update(tipo='gte', le={rs}, c='gte_wr_data_i(cpu, %d, ps2_fast_read_word(%s));' % (rt, end))
+        I.update(tipo='gte', le={rs}, c='gte_wr_data_i(cpu, %d, ps2_jan_rd32(%s));' % (rt, end))
         return I
     if op == 0x3A:  # swc2
-        I.update(tipo='gte', le={rs}, c='ps2_fast_write_word(%s, gte_rd_data_i(cpu, %d));' % (end, rt))
+        I.update(tipo='gte', le={rs}, c='ps2_jan_wr32(%s, gte_rd_data_i(cpu, %d));' % (end, rt))
         return I
+    if op == 0x10:   # COP0 (V48: o decodificador do vídeo mexe no SR)
+        if rs == 0:
+            I.update(tipo='load', esc=rt if rt else None, le=set(), expr='cpu->cop0[%d]' % rd)
+            return I
+        if rs == 4:
+            I.update(tipo='gte', le={rt}, c='cpu->cop0[%d] = %s;' % (rd, R(rt)))
+            return I
+        raise ValueError('COP0 %08x nao suportada em %08x' % (w, a))
     if op == 0x12:
         if w & (1 << 25):
             k = '%X' % (w & 0x1FFFFFF)
@@ -186,8 +222,8 @@ def decodificar(w, a):
 
 
 # ---------------------------------------------------------------- traduz
-def traduzir(exe, ini, fim, nome):
-    rot = Rotina(exe, ini, fim)
+def traduzir(exe, ini, fim, nome, cod=None):
+    rot = Rotina(exe, ini, fim, cod)
     ins = {}
     a = ini
     while a <= fim:
@@ -283,7 +319,8 @@ def main():
     exe = ler_exe(sys.argv[1])
     saida = sys.argv[2]
     partes = ['/* Gerado por tools/nativo.py a partir do executavel do jogo: NAO distribuir. */',
-              '#include <stdint.h>', '#include "cpu_state.h"', '#include "fast_memory.h"', '#include "gte_regs.h"',
+              '#include <stdint.h>', '#include "cpu_state.h"', '#include "fast_memory.h"', '#include "janela.h"', '#include "gte_regs.h"',
+              '#include "nativo_overlay.h"',
               'extern void gte_execute(CPUState *cpu, uint32_t cmd);',
               'extern uint32_t gte_read_ctrl(CPUState *cpu, uint8_t reg);',
               'extern void gte_write_ctrl(CPUState *cpu, uint8_t reg, uint32_t v);', '']
@@ -297,11 +334,41 @@ def main():
         else:
             rotinas.append(arg)
     partes.append('int ps2_nat_executar(CPUState *cpu, uint32_t ini, void (*nat)(CPUState *));')
+    overlays = []
     for arg in rotinas:
-        i, f = arg.split(':')
+        campos = arg.split()
+        if len(campos) not in (1, 2):
+            sys.exit('nativo: linha invalida: %r' % arg)
+        i, f = campos[0].split(':')
         i, f = int(i, 16), int(f, 16)
-        partes.append(traduzir(exe, i, f, 'ps2_nat_%08X' % i))
-        partes.append('int ps2_nat_%08X_gancho(CPUState *cpu) { return ps2_nat_executar(cpu, 0x%08Xu, ps2_nat_%08X); }\n' % (i, i, i))
+        if len(campos) == 1:            # rotina do executável: gancho no código gerado
+            partes.append(traduzir(exe, i, f, 'ps2_nat_%08X' % i))
+            partes.append('int ps2_nat_%08X_gancho(CPUState *cpu) { return ps2_nat_executar(cpu, 0x%08Xu, ps2_nat_%08X); }\n' % (i, i, i))
+            continue
+        # V48: rotina de overlay "inicio:fim lba:base". Vai para a tabela que o
+        # interpretador consulta; o código esperado vai junto para conferir que
+        # a RAM ainda tem ESTE overlay antes de usar a versão nativa.
+        lba, base = campos[1].split(':')
+        cod = ler_overlay(sys.argv[1], int(lba), int(base, 16), i, f)
+        if cod is None:
+            sys.stderr.write('nativo: %08X e de overlay e a entrada e o executavel: fica no interpretador\n' % i)
+            continue
+        partes.append(traduzir(exe, i, f, 'ps2_nat_%08X' % i, cod))
+        pal = struct.unpack('<%dI' % (len(cod) // 4), cod)
+        partes.append('static const uint32_t ps2_ovl_%08X_cod[%d] = {' % (i, len(pal)))
+        for k in range(0, len(pal), 6):
+            partes.append('    ' + ' '.join('0x%08Xu,' % v for v in pal[k:k + 6]))
+        partes.append('};\n')
+        overlays.append((i, len(pal)))
+    partes.append('/* V48: rotinas de overlay (runtime/interp.c, runtime/nativo_overlay.h) */')
+    if overlays:
+        partes.append('const Ps2NatOverlay ps2_nat_overlays[] = {')
+        for i, n in overlays:
+            partes.append('    {0x%08Xu, %du, ps2_ovl_%08X_cod, ps2_nat_%08X},' % (i, n, i, i))
+        partes.append('};')
+    else:
+        partes.append('const Ps2NatOverlay ps2_nat_overlays[1] = {{0u, 0u, 0, 0}};')
+    partes.append('const unsigned ps2_nat_n_overlays = %du;\n' % len(overlays))
     open(saida, 'w').write('\n'.join(partes))
 
 

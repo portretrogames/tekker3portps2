@@ -11,9 +11,11 @@
 #include "ram.h"
 #include "memory.h"
 #include "bios_hle.h"
+#include "nativo_overlay.h"
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 extern int psx_game_is_function_entry(uint32_t addr);
 extern int psx_syscall(CPUState *cpu, uint32_t code);
@@ -23,7 +25,6 @@ extern uint32_t gte_read_ctrl(CPUState *cpu, uint8_t reg);
 extern void gte_write_data(CPUState *cpu, uint8_t reg, uint32_t val);
 extern void gte_write_ctrl(CPUState *cpu, uint8_t reg, uint32_t val);
 
-unsigned long g_ps2_interp_instr;
 
 static inline uint32_t rd8(uint32_t a)  { return ps2_ram_hit(a) ? ps2_ram_get8(a)  : psx_read_byte(a); }
 static inline uint32_t rd16(uint32_t a) { return ps2_ram_hit(a) ? ps2_ram_get16(a) : psx_read_half(a); }
@@ -37,19 +38,23 @@ extern int psx_game_text_native_ok(uint32_t addr);
 
 static int sai_para(uint32_t alvo)
 {
+    /* V48: alvos que NÃO são entrada de função compilada (a tabela do
+     * despacho é constante, então a resposta não muda). Os laços do overlay
+     * faziam uma busca binária em 22 mil funções a cada desvio tomado. */
+    static uint32_t nao_entrada[1024];
+    unsigned h = (alvo >> 2) & 1023u;
     uint32_t f = alvo & 0x1FFFFFFFu;
     if (f == 0xA0u || f == 0xB0u || f == 0xC0u || alvo == 0x00000F00u)
         return 1;
+    if (nao_entrada[h] == alvo && alvo != 0u) return 0;
     /* Só sai se houver código compilado DE VERDADE (não um stub de dado). */
-    return psx_game_is_function_entry(alvo) && psx_game_text_native_ok(alvo);
+    if (!psx_game_is_function_entry(alvo)) { nao_entrada[h] = alvo; return 0; }
+    return psx_game_text_native_ok(alvo);
 }
 
-static void erro(CPUState *cpu, uint32_t pc, uint32_t ins, const char *msg)
+/* instrução que o jogo não usa: rodar adiante seria pior que parar */
+static __attribute__((noreturn)) void erro(void)
 {
-    printf("interp: %s em %08lx (instrucao %08lx)\n", msg,
-           (unsigned long)pc, (unsigned long)ins);
-    (void)cpu;
-    fflush(stdout);
     abort();
 }
 
@@ -67,7 +72,6 @@ static int passo(CPUState *cpu, uint32_t pc, uint32_t *alvo)
     uint32_t prox = pc + 4u;
     int salta = 0;
 
-    g_ps2_interp_instr++;
     switch (op) {
     case 0x00:                                   /* SPECIAL */
         switch (fn) {
@@ -111,7 +115,7 @@ static int passo(CPUState *cpu, uint32_t pc, uint32_t *alvo)
         case 0x27: r[rdn] = ~(r[rs] | r[rt]); break;                    /* NOR */
         case 0x2A: r[rdn] = (int32_t)r[rs] < (int32_t)r[rt]; break;     /* SLT */
         case 0x2B: r[rdn] = r[rs] < r[rt]; break;                       /* SLTU */
-        default: erro(cpu, pc, ins, "SPECIAL desconhecida");
+        default: erro();
         }
         break;
     case 0x01: {                                 /* BLTZ/BGEZ/BLTZAL/BGEZAL */
@@ -172,10 +176,31 @@ static int passo(CPUState *cpu, uint32_t pc, uint32_t *alvo)
         wr32(al, (w & m) | (r[rt] << s)); break; }
     case 0x32: gte_write_data(cpu, (uint8_t)rt, rd32(r[rs] + simm)); break;   /* LWC2 */
     case 0x3A: wr32(r[rs] + simm, gte_read_data(cpu, (uint8_t)rt)); break;    /* SWC2 */
-    default: erro(cpu, pc, ins, "instrucao desconhecida");
+    default: erro();
     }
     r[0] = 0;
     return salta;
+}
+
+/*
+ * V48: rotinas de overlay traduzidas para C (tools/nativo.py com
+ * tools/nativas_overlay.txt, em build/r/nativo.c). Antes de usar a versão
+ * nativa confere se a RAM tem exatamente o código que foi traduzido: outro
+ * overlay pode estar no mesmo endereço (aí segue interpretando).
+ */
+static int nativa_overlay(CPUState *cpu, uint32_t pc)
+{
+    unsigned i;
+    for (i = 0; i < ps2_nat_n_overlays; i++) {
+        const Ps2NatOverlay *o = &ps2_nat_overlays[i];
+        uint32_t f = pc & 0x1FFFFFFFu;
+        if (pc != o->ini || f + o->n * 4u > 0x200000u) continue;
+        /* bytes da RAM do PS1 = palavras little-endian, como no EE */
+        if (memcmp(&g_ps1_ram[f], o->cod, o->n * 4u) != 0) continue;
+        cpu->pc = pc;
+        return ps2_nat_executar_overlay(cpu, pc, o->nat);   /* cpu->pc = retorno */
+    }
+    return 0;
 }
 
 int ps2_interp_run(CPUState *cpu)
@@ -185,12 +210,20 @@ int ps2_interp_run(CPUState *cpu)
 
     if (!ps2_ram_hit(pc))
         return 0;
+    if (nativa_overlay(cpu, pc)) {
+        pc = cpu->pc;
+        if (sai_para(pc) || !ps2_ram_hit(pc)) return 1;
+    }
     for (;;) {
         uint32_t alvo, ignorado;
         if (passo(cpu, pc, &alvo)) {
             (void)passo(cpu, pc + 4u, &ignorado);        /* delay slot */
             pc = alvo;
             if (sai_para(pc)) { cpu->pc = pc; return 1; }
+            if (nativa_overlay(cpu, pc)) {
+                pc = cpu->pc;
+                if (sai_para(pc) || !ps2_ram_hit(pc)) return 1;
+            }
         } else {
             pc += 4u;
         }

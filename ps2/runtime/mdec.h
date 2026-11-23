@@ -20,8 +20,8 @@ void     ps2_mdec_write_control(uint32_t value);
 /* DMA0 (RAM -> MDEC) e DMA1 (MDEC -> RAM). madr = endereço PS1. */
 void     ps2_mdec_dma_in(uint32_t madr, uint32_t palavras);
 /* 1 = concluído; 0 = pendente (completa quando houver dados e então chama
- * ps2_dma_mdec_saida_pronta(), definida em io.c). */
+ * ps2_dma_mdec_saida_pronta(palavras entregues depois), definida em io.c). */
 int      ps2_mdec_dma_out(uint32_t madr, uint32_t palavras);
-void     ps2_dma_mdec_saida_pronta(void);
+void     ps2_dma_mdec_saida_pronta(uint32_t palavras);
 
 #endif

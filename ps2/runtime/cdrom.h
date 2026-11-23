@@ -3,12 +3,22 @@
  *
  * Lê o disco de uma imagem .bin (setores de 2352 bytes) e responde aos
  * comandos da libcd da Sony com as interrupções (INT1..INT5) certas.
- * Faixas de áudio (CDDA) e XA-ADPCM ainda não tocam (Fase 4).
+ * XA e CD-DA tocam em som.c (V47 e V59).
  */
 #ifndef PS2_CDROM_H
 #define PS2_CDROM_H
 
 #include <stdint.h>
+
+/* Faixas do disco (Redump): .bin de cada uma / 2352. A 2 e a 3 começam com
+ * 2 s de pregap (INDEX 00) dentro do próprio arquivo. */
+#define PS2_CD_T1_SETORES 268934u
+#define PS2_CD_T2_SETORES 11778u
+#define PS2_CD_T3_SETORES 11923u
+
+/* V59 (som.c): o CD-DA parou sozinho. normal = 1: fim da faixa (com
+ * Autopause, INT4 = DataEnd); 0: erro de leitura (só para). */
+void     ps2_cdrom_cdda_fim(int normal);
 
 /* Procura a imagem do disco (ver cdrom.c) a partir da pasta do ELF. */
 int      ps2_cdrom_abrir(const char *pasta_elf);

@@ -2,9 +2,9 @@
  * stubs.c — os símbolos de docs/runtime_api.txt que ainda não têm
  * implementação real (Fase 2).
  *
- * Regra: o que pode seguir em frente com valor neutro avisa UMA vez no log;
- * o que deixaria o jogo em estado errado (syscall, salto sem código) PARA a
- * execução mostrando o endereço — é isso que guia a próxima etapa.
+ * Regra: o que pode seguir em frente segue com valor neutro; o que deixaria o
+ * jogo em estado errado (syscall desconhecida, salto sem código) PARA a
+ * execução.
  */
 #include <stdint.h>
 #include <stdio.h>
@@ -15,16 +15,11 @@
 #include "load_accel.h"
 #include "bios_hle.h"
 
-#define AVISO() do { static int avisado; if (!avisado) { \
-    printf("stub: %s\n", __func__); avisado = 1; } } while (0)
+#define AVISO() do { } while (0)
 
 static void parar(const char *motivo, CPUState *cpu, uint32_t endereco)
 {
-    printf("PARADA: %s em %08lx (ra=%08lx a0=%08lx a1=%08lx t1=%08lx)\n",
-           motivo, (unsigned long)endereco, (unsigned long)cpu->gpr[31],
-           (unsigned long)cpu->gpr[4], (unsigned long)cpu->gpr[5],
-           (unsigned long)cpu->gpr[9]);
-    fflush(stdout);
+    (void)motivo; (void)cpu; (void)endereco;
     abort();
 }
 
@@ -40,35 +35,10 @@ int g_psx_cps_mode;
 /* Interrupções/VSync (Fase 2, próxima etapa). */
 /* Chamado em quase todo bloco: só olha o relógio a cada 256 chamadas. */
 int g_ps2_contagem_irq = 1;
-#include "prof.h"
-unsigned g_prof_hist[2048];
-unsigned g_prof_amostras, g_prof_amostras_exc;
-/* g_prof_hist: TEMPO (ciclos do EE / 256) gasto desde a amostra anterior,
- * por bloco de 1 KB do código do PS1 — antes contava só amostras, o que
- * mostrava onde há mais desvios e não onde o tempo vai. */
-unsigned long long g_prof_ciclos_amostras;
-uint32_t g_ps2_maior_sem_poll;
-unsigned long g_ps2_luta_atualiz;
 void ps2_irq_poll_lento(CPUState *cpu, uint32_t pc)
 {
     extern int ps2_bios_em_excecao(void);
     g_ps2_contagem_irq = 256;
-#ifdef _EE
-    {
-        static uint32_t ultimo;
-        uint32_t c, d;
-        __asm__ volatile("mfc0 %0, $9" : "=r"(c));
-        d = c - ultimo; ultimo = c;
-        if (d > 30000000u) d = 0;          /* 1ª amostra ou pausa longa */
-        { extern uint32_t g_ps2_maior_sem_poll; if (d > g_ps2_maior_sem_poll) g_ps2_maior_sem_poll = d; }
-        g_prof_hist[(pc >> 10) & 2047u] += d >> 8;
-        g_prof_ciclos_amostras += d;
-    }
-#else
-    g_prof_hist[(pc >> 10) & 2047u]++;
-#endif
-    g_prof_amostras++;
-    if (ps2_bios_em_excecao()) g_prof_amostras_exc++;
     ps2_irq_poll(cpu, pc);
 }
 void psx_check_interrupts_at(CPUState *cpu, uint32_t pc)
@@ -110,8 +80,6 @@ int psx_syscall(CPUState *cpu, uint32_t code)
         cpu->pc = 0;
         return 0;
     }
-    printf("syscall a0=%lu codigo=%lu\n", (unsigned long)cpu->gpr[4],
-           (unsigned long)code);
     parar("syscall nao implementado", cpu, cpu->pc);
     return 0;
 }
